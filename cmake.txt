@@ -1,0 +1,15 @@
+# 1. Create a build directory
+mkdir build
+cd build
+
+# 2. Generate Makefiles using CMake
+cmake ..
+
+# 3. Compile the code (creates the uav_pipeline executable)
+make
+
+# 4. Run the simulation
+./uav_pipeline
+
+//Rename file to CMakeLists.txt
+
