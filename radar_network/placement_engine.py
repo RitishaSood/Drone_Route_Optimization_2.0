@@ -1,286 +1,366 @@
 """
 placement_engine.py
-Core threat-sensor placement logic.
+===================
+Phase 2 — Greedy Sensor Placement Engine.
 
-v2.0 changes
+Implements the weighted greedy placement algorithm:
 
-* Sensor → ThreatSensor throughout
-* sensor_type → threat_type throughout
-* ThreatSensor now populated with x_cell/y_cell, x_m/y_m, elevation, metadata
-* Uses config.CELL_SIZE_M for metric coordinate computation
-* Placement method / version recorded in ThreatSensor.metadata
+    For each sensor type:
+      1. Take the pre-built suitability map (NFZ cells already zeroed).
+      2. Flatten and argsort descending → ranked candidate list.
+      3. Iterate candidates in order:
+           - Skip if min Euclidean distance to already-placed sensors
+             of the same type < separation threshold.
+           - Otherwise place sensor here.
+      4. Stop when the requested count is reached or candidates exhausted.
 
-Pipeline per threat type
+No optimisation algorithms (GA, ACO, MCLP) are used.
+No LOS constraints are applied here.
+Separation is Euclidean distance in grid cells.
 
-1. Build a placement-suitability map by taking a weighted sum of terrain layers.
-2. Mask out cells that violate hard constraints (NFZ, out-of-bounds).
-3. Greedily select cells: pick highest score → enforce minimum separation →
-   repeat until the required count is placed.
-4. Return ThreatSensor objects for export and visualisation.
-
-Architecture hook for future weight methods
-
-`build_suitability_map(terrain, weights)` accepts any `weights` dict.
-To plug in AHP, optimisation, or literature-derived weights, replace what
-`_get_weights()` returns — no other changes needed.
-
-FUTURE extension points
-
-* MCLP (Maximum Coverage Location Problem) batch placement.
-* LOS / viewshed constraint masking before greedy selection.
-* Genetic algorithm replacing the greedy selector.
-* Antenna orientation optimisation post-placement.
+Sensor counts are NOT stored in config.
+They are supplied at call time via the `counts` parameter of `place()`.
 """
 
+from __future__ import annotations
+
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
-from typing import Dict, List, Tuple
 
-import config
-from terrain_loader import TerrainData
-from sensor_types   import ThreatSensor, PlacementRequest
-
-# Placement engine version — recorded in every ThreatSensor.metadata block.
-_ENGINE_VERSION    = "2.0"
-_PLACEMENT_METHOD  = "weighted_greedy"
+from config import SensorPlacementConfig, DEFAULT_CONFIG
+from sensor_types import (
+    SENSOR_TYPES,
+    SENSOR_REGISTRY,
+    PlacedSensor,
+)
 
 
-# Public interface
-
-def place_all_sensors(terrain: TerrainData,
-                      request: PlacementRequest) -> List[ThreatSensor]:
+class PlacementEngine:
     """
-    Place all requested threat sensors and return the full sensor list.
+    Greedy placement engine.  Stateless between calls — each call to
+    place() is independent and returns a fresh list of PlacedSensor objects.
 
     Parameters
-    
-    terrain : loaded TerrainData
-    request : PlacementRequest with per-type counts
+    ----------
+    tg  : TerrainGenerator
+        Live terrain object.  Used to read elevation and terrain_type
+        at the chosen cell for each PlacedSensor record.
+    lb  : LayerBuilder
+        Pre-built layer builder carrying suitability_maps and nfz_mask.
+    cfg : SensorPlacementConfig
+        Master config (separation distances, cell_size_m, etc.).
     """
-    all_sensors: List[ThreatSensor] = []
-    global_id_counter = 1
 
-    nfz       = terrain.get_layer("nfz")
-    elevation  = terrain.get_layer("elevation")
+    def __init__(self, tg, lb, cfg: SensorPlacementConfig = DEFAULT_CONFIG):
+        self.tg  = tg
+        self.lb  = lb
+        self.cfg = cfg
+        self.rows = tg.grid_size
+        self.cols = tg.grid_size
 
-    for threat_type in config.SENSOR_DEFINITIONS:
-        count = request.counts.get(threat_type, 0)
-        if count == 0:
-            continue
+    # -----------------------------------------------------------------------
+    # Public interface
+    # -----------------------------------------------------------------------
 
-        weights     = _get_weights(threat_type)
-        suitability = build_suitability_map(terrain, weights)
+    def place(self, counts: Dict[str, int]) -> List[PlacedSensor]:
+        """
+        Place sensors for all types and return the full placement list.
 
-        # Per-layer raw scores — stored in placement_factors for debugging
-        layer_scores = _compute_layer_scores(terrain, weights)
+        Parameters
+        ----------
+        counts : dict[str, int]
+            Number of sensors to place per type.
+            e.g. {'radar': 6, 'visual': 8, 'infrared': 6, 'acoustic': 8}
+            Supplied at runtime from main.py — not stored in config.
 
-        min_sep    = config.SENSOR_DEFINITIONS[threat_type]["min_sep"]
-        placements = _greedy_place(suitability, nfz, count, min_sep)
+        Returns
+        -------
+        List[PlacedSensor]
+            All placed sensors across all types, in placement order.
+            sensor_id is globally unique and sequential (1-based).
+        """
+        all_placed: List[PlacedSensor] = []
+        global_id = 1
 
-        for (row, col) in placements:
-            factors = {layer: float(arr[row, col])
-                       for layer, arr in layer_scores.items()}
-
-            # Metric coordinates derived from cell indices + world convention
-            x_m = col * config.CELL_SIZE_M
-            y_m = row * config.CELL_SIZE_M
-
-            sensor = ThreatSensor(
-                id               = global_id_counter,
-                threat_type      = threat_type,
-                x_cell           = int(col),
-                y_cell           = int(row),
-                x_m              = float(x_m),
-                y_m              = float(y_m),
-                elevation        = float(elevation[row, col]),
-                placement_score  = float(suitability[row, col]),
-                placement_factors= factors,
-                metadata         = {
-                    "placement_method":          _PLACEMENT_METHOD,
-                    "placement_engine_version":  _ENGINE_VERSION,
-                    # FUTURE: coverage_radius, frequency_band,
-                    #         sensor_power, orientation
-                },
-            )
-            all_sensors.append(sensor)
-            global_id_counter += 1
-
-        print(f"[placement_engine] Placed {len(placements):2d} × {threat_type:<10s}"
-              f"  (requested {count})")
-
-    return all_sensors
-
-
-def build_suitability_map(terrain: TerrainData,
-                           weights: Dict[str, float]) -> np.ndarray:
-    """
-    Compute a normalised weighted-sum suitability map.
-
-    Parameters
-    
-    terrain : TerrainData
-    weights : {layer_name: weight}  (need not sum to 1 — normalised internally)
-
-    Returns
-    
-    2-D float32 array in [0, 1]
-
-    FUTURE: add non-linear combination models (multiplicative, fuzzy logic).
-    """
-    cols, rows = terrain.grid_size
-    score        = np.zeros((rows, cols), dtype=np.float32)
-    total_weight = 0.0
-
-    for layer_name, w in weights.items():
-        layer         = _resolve_layer(terrain, layer_name)
-        score        += w * layer
-        total_weight += w
-
-    if total_weight > 1e-9:
-        score /= total_weight
-
-    return _normalise(score)
-
-
-
-# Greedy placement
-
-
-def _greedy_place(suitability: np.ndarray,
-                  nfz:         np.ndarray,
-                  count:       int,
-                  min_sep:     int) -> List[Tuple[int, int]]:
-    """
-    Select `count` cells by descending suitability, enforcing minimum
-    separation distance and avoiding NFZ cells.
-
-    Algorithm
-    
-    1. Mask out NFZ cells.
-    2. Flatten and sort indices by score (descending).
-    3. Iterate: accept cell if it satisfies min_sep from already-placed cells.
-
-    FUTURE: replace with MCLP / ILP / genetic algorithm for global optimum.
-    """
-    mask   = (nfz == 0).astype(bool)          # True = eligible
-    masked = np.where(mask, suitability, -1.0)
-
-    # Flat indices sorted highest → lowest
-    flat_sorted      = np.argsort(masked.ravel())[::-1]
-    rows_all, cols_all = np.unravel_index(flat_sorted, suitability.shape)
-
-    placed:     List[Tuple[int, int]] = []
-    placed_arr = np.empty((0, 2), dtype=int)   # shape (n, 2) for fast distance
-
-    for r, c in zip(rows_all, cols_all):
-        if masked[r, c] < 0:
-            break   # remaining candidates are NFZ or exhausted
-
-        if placed_arr.shape[0] > 0:
-            dists = np.sqrt(((placed_arr[:, 0] - r)**2 +
-                             (placed_arr[:, 1] - c)**2))
-            if dists.min() < min_sep:
+        for st in SENSOR_TYPES:
+            name  = st.name
+            count = counts.get(name, 0)
+            if count <= 0:
                 continue
 
-        placed.append((r, c))
-        placed_arr = np.vstack([placed_arr, [[r, c]]])
+            placed = self._place_type(
+                sensor_type=st,
+                count=count,
+                start_id=global_id,
+            )
+            all_placed.extend(placed)
+            global_id += len(placed)
 
-        if len(placed) >= count:
-            break
+        return all_placed
 
-    if len(placed) < count:
-        print(f"[placement_engine] WARNING: could only place {len(placed)} "
-              f"(requested {count}) — relax min_sep or reduce count.")
+    # -----------------------------------------------------------------------
+    # Core greedy algorithm
+    # -----------------------------------------------------------------------
 
-    return placed
+    def _place_type(
+        self,
+        sensor_type,
+        count: int,
+        start_id: int,
+    ) -> List[PlacedSensor]:
+        """
+        Greedy placement for a single sensor type.
+
+        Algorithm
+        ---------
+        1. Retrieve suitability map for this type (NFZ cells = 0).
+        2. Flatten to 1-D and argsort descending — best cells first.
+        3. Walk the ranked list:
+               a. Convert flat index → (row, col).
+               b. Skip if suitability == 0 (NFZ or normalisation floor).
+               c. Skip if too close to any already-placed sensor of same type.
+               d. Place sensor; record PlacedSensor; stop when count met.
+
+        Separation check
+        ----------------
+        Uses Euclidean distance in grid cells:
+            d(p, q) = sqrt((p.row - q.row)^2 + (p.col - q.col)^2)
+        A candidate is accepted only if d >= separation[type] for ALL
+        already-placed sensors of the same type.
+
+        Parameters
+        ----------
+        sensor_type : SensorType
+        count       : int   — number of sensors to place
+        start_id    : int   — first sensor_id to assign (globally unique)
+
+        Returns
+        -------
+        List[PlacedSensor]
+        """
+        name       = sensor_type.name
+        suit_map   = self.lb.suitability_maps[name]       # (rows, cols) float32
+        sep        = self.cfg.placement.separation[name]  # minimum cell distance
+        cell_size  = self.cfg.terrain.cell_size_m
+
+        # Flatten suitability scores and rank descending
+        flat_suit  = suit_map.flatten()
+        ranked_idx = np.argsort(flat_suit)[::-1]          # best → worst
+
+        placed: List[PlacedSensor] = []
+        placed_coords: List[Tuple[int, int]] = []         # (row, col) fast check
+
+        for flat_i in ranked_idx:
+            if len(placed) >= count:
+                break
+
+            score = float(flat_suit[flat_i])
+            if score <= 0.0:
+                # Remaining candidates are NFZ-zeroed or zero suitability
+                break
+
+            row = int(flat_i // self.cols)
+            col = int(flat_i  % self.cols)
+
+            # Separation check against all already-placed sensors of this type
+            if not self._passes_separation(row, col, placed_coords, sep):
+                continue
+
+            # Construct PlacedSensor record
+            sensor = PlacedSensor(
+                sensor_id    = start_id + len(placed),
+                sensor_type  = name,
+                row          = row,
+                col          = col,
+                elevation_m  = float(self.tg.terrain[row, col]),
+                terrain_class= str(self.tg.terrain_type[row, col]),
+                suitability  = score,
+                _cell_size_m = cell_size,
+            )
+            placed.append(sensor)
+            placed_coords.append((row, col))
+
+        if len(placed) < count:
+            print(
+                f"  [WARNING] {name}: requested {count} sensors, "
+                f"placed {len(placed)} "
+                f"(grid too small, separation too large, or NFZ coverage too high)"
+            )
+
+        return placed
+
+    # -----------------------------------------------------------------------
+    # Separation helper
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _passes_separation(
+        row: int,
+        col: int,
+        existing: List[Tuple[int, int]],
+        min_sep: float,
+    ) -> bool:
+        """
+        Return True if (row, col) is at least min_sep cells away from
+        every coordinate in `existing`.
+
+        Uses squared-distance comparison to avoid sqrt for every check,
+        converting only once: min_sep_sq = min_sep^2.
+        """
+        if not existing:
+            return True
+
+        min_sep_sq = min_sep ** 2
+        for (er, ec) in existing:
+            d_sq = (row - er) ** 2 + (col - ec) ** 2
+            if d_sq < min_sep_sq:
+                return False
+        return True
+
+    # -----------------------------------------------------------------------
+    # Diagnostics
+    # -----------------------------------------------------------------------
+
+    def summary(self, placed: List[PlacedSensor]) -> str:
+        """Return a printable placement summary grouped by sensor type."""
+        lines = [
+            "=" * 60,
+            "  Placement Engine — Results",
+            "=" * 60,
+        ]
+
+        by_type: Dict[str, List[PlacedSensor]] = {}
+        for p in placed:
+            by_type.setdefault(p.sensor_type, []).append(p)
+
+        for st in SENSOR_TYPES:
+            name    = st.name
+            sensors = by_type.get(name, [])
+            if not sensors:
+                continue
+
+            scores = [s.suitability for s in sensors]
+            elevs  = [s.elevation_m for s in sensors]
+            lines.append(f"\n  {st.label} ({name})  — {len(sensors)} placed")
+            lines.append(
+                f"    suitability : min={min(scores):.3f}  "
+                f"max={max(scores):.3f}  mean={sum(scores)/len(scores):.3f}"
+            )
+            lines.append(
+                f"    elevation   : min={min(elevs):.0f}m  "
+                f"max={max(elevs):.0f}m  mean={sum(elevs)/len(elevs):.0f}m"
+            )
+
+            # Terrain class breakdown
+            class_counts: Dict[str, int] = {}
+            for s in sensors:
+                class_counts[s.terrain_class] = \
+                    class_counts.get(s.terrain_class, 0) + 1
+            breakdown = "  ".join(
+                f"{k}:{v}" for k, v in sorted(class_counts.items())
+            )
+            lines.append(f"    terrain     : {breakdown}")
+
+            # Individual placements
+            for s in sensors:
+                lines.append(
+                    f"      #{s.sensor_id:>3}  "
+                    f"({s.row:3d},{s.col:3d})  "
+                    f"elev={s.elevation_m:6.0f}m  "
+                    f"{s.terrain_class:<10}  "
+                    f"score={s.suitability:.3f}"
+                )
+
+        lines.append("\n" + "=" * 60)
+        lines.append(f"  Total sensors placed: {len(placed)}")
+        lines.append("=" * 60)
+        return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
 
-# Weight resolution
+if __name__ == "__main__":
+    import sys
+    import numpy as _np
 
+    sys.path.insert(0, ".")
 
-def _get_weights(threat_type: str) -> Dict[str, float]:
-    """
-    Return the weight dict for a threat type from config.
+    from terraingeneration import TerrainGenerator
+    from config import DEFAULT_CONFIG
+    from layer_builder import LayerBuilder
 
-    FUTURE: This function is the hook for AHP / optimisation weight providers.
-    Replace body with:
-        return ahp_module.compute_weights(threat_type, pairwise_matrix)
-    or:
-        return weight_optimizer.load(threat_type)
-    """
-    return config.SENSOR_WEIGHTS.get(threat_type, {})
+    # Build terrain
+    seed = 42
+    _np.random.seed(seed)
+    tg = TerrainGenerator(
+        grid_size=100, scale=40.0, octaves=6,
+        persistence=0.5, lacunarity=2.0, seed=seed
+    )
+    tg.generate_base_terrain()
+    tg.add_ridges(num_ridges=4, ridge_height=180, ridge_width=6.0)
+    tg.add_valleys(num_valleys=2, valley_depth=150, valley_width=10.0)
+    tg.classify_terrain()
+    tg.calculate_slope()
+    tg.generate_cost_map()
 
+    # Build layers
+    lb = LayerBuilder(tg, DEFAULT_CONFIG)
 
-def _resolve_layer(terrain: TerrainData, layer_name: str) -> np.ndarray:
-    """
-    Map a weight-config layer name to an actual numpy array.
+    # Run placement
+    engine = PlacementEngine(tg, lb, DEFAULT_CONFIG)
+    counts = {'radar': 6, 'visual': 8, 'infrared': 6, 'acoustic': 8}
+    placed = engine.place(counts)
 
-    Standard layers are read directly from TerrainData.
-    Derived / synthetic layers are computed on demand:
-      terrain_type_urban  — binary mask of urban cells
-      terrain_type_forest — binary mask of forest cells
-      distance_from_urban — normalised distance transform from urban zones
+    print(engine.summary(placed))
 
-    FUTURE: Add "slope", "aspect", "radar_shadow", "los_count" here.
-    """
-    # --- Standard layers (direct lookup) ---
-    if layer_name in terrain.layers:
-        return terrain.get_layer(layer_name)
+    # --- Assertions ---
 
-    # --- Derived layers from terrain_type ---
-    tt = terrain.get_layer("terrain_type")
+    # Total count
+    assert len(placed) == sum(counts.values()), \
+        f"Expected {sum(counts.values())} sensors, got {len(placed)}"
+    print(f"\nPASS  total sensors placed = {len(placed)}")
 
-    if layer_name == "terrain_type_urban":
-        return (tt == 3).astype(np.float32)
+    # IDs are unique and sequential from 1
+    ids = [p.sensor_id for p in placed]
+    assert ids == list(range(1, len(placed) + 1)), "sensor_ids not sequential"
+    print("PASS  sensor_ids are unique and sequential")
 
-    if layer_name == "terrain_type_forest":
-        return (tt == 2).astype(np.float32)
+    # No sensor placed in an NFZ cell
+    for p in placed:
+        assert lb.nfz_mask[p.row, p.col] == 0, \
+            f"Sensor {p.sensor_id} placed inside NFZ at ({p.row},{p.col})"
+    print("PASS  no sensor placed inside NFZ")
 
-    if layer_name == "distance_from_urban":
-        # Cells far from urban noise score higher for acoustic sensors
-        from scipy.ndimage import distance_transform_edt
-        urban_mask = (tt == 3)
-        if urban_mask.any():
-            dist = distance_transform_edt(~urban_mask).astype(np.float32)
-        else:
-            rows, cols = tt.shape
-            dist = np.ones((rows, cols), dtype=np.float32)
-        return _normalise(dist)
+    # Separation enforced per type
+    by_type: Dict[str, List] = {}
+    for p in placed:
+        by_type.setdefault(p.sensor_type, []).append(p)
 
-    # FUTURE: add "slope", "aspect", "radar_shadow", "los_count" here
+    for stype, sensors in by_type.items():
+        sep = DEFAULT_CONFIG.placement.separation[stype]
+        for i, a in enumerate(sensors):
+            for b in sensors[i+1:]:
+                d = ((a.row - b.row)**2 + (a.col - b.col)**2) ** 0.5
+                assert d >= sep, (
+                    f"{stype} sensors #{a.sensor_id} and #{b.sensor_id} "
+                    f"are {d:.2f} cells apart — minimum is {sep}"
+                )
+    print("PASS  separation constraints satisfied for all sensor types")
 
-    print(f"[placement_engine] WARNING: unknown layer '{layer_name}' — using zeros.")
-    rows, cols = tt.shape
-    return np.zeros((rows, cols), dtype=np.float32)
+    # Metric coordinates correct
+    for p in placed:
+        assert p.x_m == p.col * DEFAULT_CONFIG.terrain.cell_size_m
+        assert p.y_m == p.row * DEFAULT_CONFIG.terrain.cell_size_m
+    print("PASS  metric coordinates (x_m, y_m) are correct")
 
+    # to_dict schema
+    d = placed[0].to_dict()
+    for key in ('id','sensor_type','label','row','col',
+                'x_m','y_m','elevation_m','terrain_class','suitability'):
+        assert key in d, f"Missing key '{key}' in to_dict()"
+    print("PASS  PlacedSensor.to_dict() schema complete")
 
-def _compute_layer_scores(terrain: TerrainData,
-                           weights: Dict[str, float]) -> Dict[str, np.ndarray]:
-    """Return per-layer raw (un-weighted) arrays for placement_factors logging."""
-    return {name: _resolve_layer(terrain, name) for name in weights}
-
-
-
-# Utility
-
-
-def _normalise(arr: np.ndarray) -> np.ndarray:
-    lo, hi = arr.min(), arr.max()
-    if hi - lo < 1e-9:
-        return np.zeros_like(arr)
-    return (arr - lo) / (hi - lo)
-
-
-
-# Suitability map getter (for visualisation)
-
-
-def get_all_suitability_maps(terrain: TerrainData) -> Dict[str, np.ndarray]:
-    """
-    Return a dict of {threat_type: suitability_map} for all threat types.
-    Used by visualization.py to render one subplot per type.
-    """
-    return {
-        tt: build_suitability_map(terrain, _get_weights(tt))
-        for tt in config.SENSOR_DEFINITIONS
-    }
+    print("\nAll placement_engine.py checks passed.")

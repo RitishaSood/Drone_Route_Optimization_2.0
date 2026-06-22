@@ -1,93 +1,156 @@
 """
 exporter.py
+===========
+Exports placed sensor data to sensor_map.json.
 
-Serialises the placed ThreatSensor list to sensor_map.json.
+Each sensor entry follows this schema:
+    {
+      "id":            1,
+      "sensor_type":   "radar",
+      "label":         "Radar",
+      "row":           45,
+      "col":           67,
+      "x_m":           6700.0,
+      "y_m":           4500.0,
+      "elevation_m":   823.4,
+      "terrain_class": "Mountain",
+      "suitability":   0.9134
+    }
 
-v2.0 changes
+Metric conversion: x_m = col * cell_size_m,  y_m = row * cell_size_m
+At 100 m/cell on a 100x100 grid: coverage area = 10 km x 10 km.
 
-* Sensor - ThreatSensor throughout
-* sensor_type - threat_type in sensor counts
-* Full metadata block added:
-    - placement_engine_version, placement_method
-    - terrain_source, cell_size_m
-    - grid_size, world_size_m
-    - coordinate_system, coordinate_convention
-    - los_compatible, elevation_provided
-* sensor_counts keyed by threat_type
-
-Kept as a separate module so the export format can evolve independently
-of the placement engine and visualisation layers.
-
-FUTURE extension points
-
-* Export to GeoJSON (with real coordinates after CRS is added).
-* Export to KML for Google Earth overlay.
-* Export coverage raster alongside sensor locations.
-* Stream to a REST API endpoint.
-* terrain_source: swap "synthetic" for "geotiff" / "srtm" / "lidar".
+The top-level JSON object also includes a run metadata block:
+    {
+      "metadata": {
+        "grid_size":      100,
+        "cell_size_m":    100.0,
+        "coverage_km2":   100.0,
+        "total_sensors":  28,
+        "active_nfzs":    5,
+        "seed":           42,
+        "sensor_counts":  {"radar": 6, "visual": 8, ...}
+      },
+      "sensors": [ ... ]
+    }
 """
 
+from __future__ import annotations
+
 import json
-from pathlib import Path
-from typing import List
+import os
+from typing import Dict, List
 
-import config
-from sensor_types import ThreatSensor
-
-# Matches value recorded inside each ThreatSensor.metadata block.
-_ENGINE_VERSION   = "2.0"
-_PLACEMENT_METHOD = "weighted_greedy"
-_TERRAIN_SOURCE   = "synthetic"  # FUTURE: "geotiff", "srtm", "lidar", "gis_import"
+from config import SensorPlacementConfig, DEFAULT_CONFIG
+from sensor_types import SENSOR_TYPES, PlacedSensor
 
 
-def save_sensor_map(sensors: List[ThreatSensor],
-                    output_path: Path = config.SENSOR_FILE) -> None:
+class Exporter:
     """
-    Write ThreatSensor list to sensor_map.json.
+    Serialises placement results to sensor_map.json.
 
     Parameters
     ----------
-    sensors     : list of placed ThreatSensor objects
-    output_path : destination file (defaults to config.SENSOR_FILE)
+    tg  : TerrainGenerator  — provides grid_size and seed for metadata.
+    lb  : LayerBuilder      — provides active NFZ count for metadata.
+    cfg : SensorPlacementConfig
     """
-    sensor_map = {
-        "metadata": {
-            #  Engine provenance 
-            "placement_engine_version": _ENGINE_VERSION,
-            "placement_method":         _PLACEMENT_METHOD,
-            "terrain_source":           _TERRAIN_SOURCE,
 
-            # World geometry
-            "cell_size_m":  config.CELL_SIZE_M,
-            "grid_size":    list(config.GRID_SIZE),           # [cols, rows]
-            "world_size_m": [config.WORLD_WIDTH_M,
-                             config.WORLD_HEIGHT_M],          # [10000, 10000]
+    def __init__(self, tg, lb, cfg: SensorPlacementConfig = DEFAULT_CONFIG):
+        self.tg  = tg
+        self.lb  = lb
+        self.cfg = cfg
+        os.makedirs(os.path.dirname(cfg.export.output_file), exist_ok=True)
 
-            # Coordinate convention 
-            # Explicit so downstream teams cannot misinterpret orientation.
-            "coordinate_system": config.COORDINATE_SYSTEM,
-            "coordinate_convention": {
-                "origin":    "bottom_left",
-                "x_axis":    "east",
-                "y_axis":    "north",
-                "cell_size_m": config.CELL_SIZE_M,
+    def export(self, placed: List[PlacedSensor], seed: int) -> str:
+        """
+        Write sensor_map.json and return the output file path.
+
+        Parameters
+        ----------
+        placed : list of PlacedSensor objects from PlacementEngine.
+        seed   : the terrain generation seed used for this run (for metadata).
+        """
+        cell_m = self.cfg.export.cell_size_m
+        gs     = self.tg.grid_size
+
+        # Per-type sensor counts
+        counts: Dict[str, int] = {}
+        for st in SENSOR_TYPES:
+            counts[st.name] = sum(1 for p in placed if p.sensor_type == st.name)
+
+        payload = {
+            "metadata": {
+                "grid_size":     gs,
+                "cell_size_m":   cell_m,
+                "coverage_km2":  round((gs * cell_m / 1000) ** 2, 2),
+                "total_sensors": len(placed),
+                "active_nfzs":   len(self.lb.active_nfzs),
+                "seed":          seed,
+                "sensor_counts": counts,
             },
+            "sensors": [p.to_dict() for p in placed],
+        }
 
-            # LOS / downstream compatibility flags 
-            "los_compatible":    True,   # elevation data present per sensor
-            "elevation_provided": True,  # ThreatSensor.elevation is populated
+        path = self.cfg.export.output_file
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
 
-            #  Sensor counts
-            "total_sensors": len(sensors),
-            "sensor_counts": {
-                tt: sum(1 for s in sensors if s.threat_type == tt)
-                for tt in config.SENSOR_DEFINITIONS
-            },
+        return path
 
-            # FUTURE: add CRS, bounding_box when georeferencing is implemented
-        },
-        "sensors": [s.to_dict() for s in sensors],
-    }
 
-    output_path.write_text(json.dumps(sensor_map, indent=2))
-    print(f"[exporter] Saved {len(sensors)} threat sensors to {output_path}")
+# ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import sys
+    import numpy as _np
+
+    sys.path.insert(0, ".")
+    from terraingeneration import TerrainGenerator
+    from config import DEFAULT_CONFIG, SensorPlacementConfig
+    from layer_builder import LayerBuilder
+    from placement_engine import PlacementEngine
+
+    seed = 42
+    _np.random.seed(seed)
+    tg = TerrainGenerator(
+        grid_size=100, scale=40.0, octaves=6,
+        persistence=0.5, lacunarity=2.0, seed=seed,
+    )
+    tg.generate_base_terrain()
+    tg.add_ridges(num_ridges=4, ridge_height=180, ridge_width=6.0)
+    tg.add_valleys(num_valleys=2, valley_depth=150, valley_width=10.0)
+    tg.classify_terrain()
+    tg.calculate_slope()
+    tg.generate_cost_map()
+
+    cfg = SensorPlacementConfig()
+    lb  = LayerBuilder(tg, cfg)
+    engine = PlacementEngine(tg, lb, cfg)
+    placed = engine.place({'radar': 6, 'visual': 8, 'infrared': 6, 'acoustic': 8})
+
+    exporter = Exporter(tg, lb, cfg)
+    path = exporter.export(placed, seed=seed)
+    print(f"Exported → {path}")
+
+    # Verify JSON structure
+    with open(path) as f:
+        data = json.load(f)
+
+    assert "metadata" in data and "sensors" in data
+    assert data["metadata"]["total_sensors"] == len(placed)
+    assert data["metadata"]["coverage_km2"]  == 100.0
+    assert len(data["sensors"])              == len(placed)
+
+    required = {'id','sensor_type','label','row','col',
+                'x_m','y_m','elevation_m','terrain_class','suitability'}
+    for entry in data["sensors"]:
+        assert required.issubset(entry.keys()), f"Missing keys in {entry}"
+
+    print(f"PASS  {len(data['sensors'])} sensors, all keys present")
+    print(f"PASS  coverage_km2 = {data['metadata']['coverage_km2']}")
+    print(f"PASS  sensor_counts = {data['metadata']['sensor_counts']}")
+    print(json.dumps(data["sensors"][0], indent=2))
+    print("\nAll exporter.py checks passed.")

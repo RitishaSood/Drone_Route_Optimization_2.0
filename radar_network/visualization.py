@@ -1,203 +1,521 @@
 """
 visualization.py
+================
+All matplotlib visualisation for the UAV Sensor Placement System.
 
-All matplotlib figure generation for the UAV sensor placement project.
+Style contract
+--------------
+All terrain base maps reuse the terrain team's exact conventions from
+terraingeneration.py so that sensor overlays integrate naturally:
+  - ListedColormap with tg.cmap_colors  ('#2B4C7E','#4A7C59',...)
+  - BoundaryNorm with tg.bounds         ([0,150,350,600,800,1000])
+  - Colorbar ticks at [75,250,475,700,900] labelled with tg.classes
+  - origin='lower'  on every imshow call
+  - Grid: alpha=0.3, linestyle='--'
+  - xlabel='Grid X-Coordinate', ylabel='Grid Y-Coordinate'
 
-v2.0 changes
-
-* Sensor - ThreatSensor throughout
-* sensor_type - threat_type throughout
-* Placement figure legend title updated to "Threat Type"
-* Sensor positions read from x_cell / y_cell (replaces x / y)
-* No visual redesign — all existing plots retained unchanged
+Sensor symbols (per spec):
+  radar    → '^'  red     #FF4444
+  infrared → 's'  orange  #FF8800
+  acoustic → 'o'  blue    #4488FF
+  visual   → 'D'  green   #44FF44
 
 Figures produced
+----------------
+  1. plot_terrain_with_sensors()  — terrain team base map + all sensors
+  2. plot_suitability_grid()      — 2×2 grid of the four suitability maps
+  3. plot_layer_grid()            — 2×2 grid of the three input layers + NFZ
+  4. plot_elevation_3d()          — terrain team 3-D surface (no sensors)
 
-1. terrain_type.png          — categorical terrain-type map
-2. elevation.png             — continuous elevation heatmap
-3. strategic_importance.png  — importance surface
-4. nfz_overlay.png           — elevation + NFZ mask
-5. suitability_<type>.png    — one per threat type
-6. sensor_placement.png      — final placement map with all sensor overlays
-
-Design
-
-* Each figure is saved to config.OUTPUT_DIR.
-* Functions are stateless — pass in data, get a saved file.
-* Figure/axis creation is separated from data logic for testability.
-
-FUTURE extension points
-
-* Add viewshed / LOS coverage overlay to sensor_placement figure.
-* Add radar range rings around radar sensors.
-* Export interactive HTML via plotly (swap render backend).
+Each method returns the Figure so main.py can save it.
+show_plots=True in VizConfig triggers plt.show(block=False) per figure.
 """
 
-import numpy as np
-import matplotlib
-matplotlib.use("Agg")                          # headless rendering
+from __future__ import annotations
+
+import os
+from typing import Dict, List, Optional
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.colors import ListedColormap
-from pathlib import Path
-from typing import Dict, List
+import numpy as np
+from matplotlib.colors import BoundaryNorm, ListedColormap
 
-import config
-from sensor_types import ThreatSensor
-
-
-# Discrete colour map for terrain types:
-# water=blue, plain=lime-green, forest=dark-green, urban=grey, mountain=brown
-_TERRAIN_COLOURS = ["#4A90D9", "#A8D5A2", "#2D6A4F", "#888888", "#8B5E3C"]
-_TERRAIN_CMAP    = ListedColormap(_TERRAIN_COLOURS)
+from config import SensorPlacementConfig, DEFAULT_CONFIG
+from sensor_types import SENSOR_TYPES, PlacedSensor
 
 
-
-# Public API
-
-
-def save_all(terrain_layers:   Dict[str, np.ndarray],
-             suitability_maps: Dict[str, np.ndarray],
-             sensors:          List[ThreatSensor],
-             output_dir:       Path = config.OUTPUT_DIR) -> None:
+class Visualizer:
     """
-    Render and save every figure.
+    Produces all figures for the sensor placement system.
 
     Parameters
-    
-    terrain_layers   : {layer_name: 2-D array}
-    suitability_maps : {threat_type: 2-D suitability array}
-    sensors          : list of placed ThreatSensor objects
-    output_dir       : destination folder (created if absent)
+    ----------
+    tg  : TerrainGenerator  — live terrain object (owns cmap, bounds, classes)
+    lb  : LayerBuilder      — provides layer arrays and suitability maps
+    cfg : SensorPlacementConfig
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
 
-    _plot_terrain_type   (terrain_layers["terrain_type"],         output_dir)
-    _plot_elevation      (terrain_layers["elevation"],            output_dir)
-    _plot_strategic      (terrain_layers["strategic_importance"],  output_dir)
-    _plot_nfz_overlay    (terrain_layers["elevation"],
-                          terrain_layers["nfz"],                  output_dir)
+    def __init__(self, tg, lb, cfg: SensorPlacementConfig = DEFAULT_CONFIG):
+        self.tg  = tg
+        self.lb  = lb
+        self.cfg = cfg
+        self._dpi = cfg.viz.figure_dpi
 
-    for threat_type, smap in suitability_maps.items():
-        _plot_suitability(smap, threat_type, output_dir)
+        # ── Terrain team's exact colormap & norm (single source of truth) ──
+        self._cmap = ListedColormap(tg.cmap_colors)
+        self._norm = BoundaryNorm(tg.bounds, self._cmap.N)
+        self._cbar_ticks  = [75, 250, 475, 700, 900]
+        self._cbar_labels = tg.classes
 
-    _plot_sensor_placement(terrain_layers["elevation"], sensors, output_dir)
+        # Output directory
+        os.makedirs(cfg.viz.output_dir, exist_ok=True)
 
-    print(f"[visualization] All figures saved to {output_dir}")
+    # -----------------------------------------------------------------------
+    # Internal helpers
+    # -----------------------------------------------------------------------
 
+    def _terrain_imshow(self, ax: plt.Axes) -> None:
+        """
+        Draw the terrain base layer on `ax` using the terrain team's exact
+        colormap, norm, and origin.  Shared by every figure that shows terrain.
+        """
+        img = ax.imshow(
+            self.tg.terrain,
+            cmap=self._cmap,
+            norm=self._norm,
+            origin='lower',
+        )
+        cbar = plt.colorbar(img, ax=ax, ticks=self._cbar_ticks, shrink=0.85)
+        cbar.ax.set_yticklabels(self._cbar_labels)
+        cbar.set_label('Tactical Terrain Classification Level', fontsize=8)
 
+    def _apply_grid_style(self, ax: plt.Axes, title: str) -> None:
+        """Apply terrain team axis style to `ax`."""
+        ax.set_title(title, fontsize=10, fontweight='bold', pad=6)
+        ax.set_xlabel('Grid X-Coordinate', fontsize=8)
+        ax.set_ylabel('Grid Y-Coordinate', fontsize=8)
+        ax.grid(True, alpha=0.3, linestyle='--')
 
-# Individual figure functions (private)
-
-
-def _plot_terrain_type(tt: np.ndarray, out: Path) -> None:
-    fig, ax = plt.subplots(figsize=(7, 6), dpi=config.FIGURE_DPI)
-    ax.imshow(tt, cmap=_TERRAIN_CMAP, vmin=0,
-              vmax=len(_TERRAIN_COLOURS) - 1, origin="lower")
-    ax.set_title("Terrain Type", fontsize=14, fontweight="bold")
-    ax.set_xlabel("Column (x)"); ax.set_ylabel("Row (y)")
-    patches = [mpatches.Patch(color=_TERRAIN_COLOURS[i],
-                               label=config.TERRAIN_TYPE_LABELS[i])
-               for i in range(len(_TERRAIN_COLOURS))]
-    ax.legend(handles=patches, loc="lower right", fontsize=8, framealpha=0.85)
-    _save(fig, out / "terrain_type.png")
-
-
-def _plot_elevation(elev: np.ndarray, out: Path) -> None:
-    fig, ax = plt.subplots(figsize=(7, 6), dpi=config.FIGURE_DPI)
-    im = ax.imshow(elev, cmap="terrain", origin="lower")
-    plt.colorbar(im, ax=ax, label="Normalised Elevation")
-    ax.set_title("Elevation Map", fontsize=14, fontweight="bold")
-    ax.set_xlabel("Column (x)"); ax.set_ylabel("Row (y)")
-    _save(fig, out / "elevation.png")
-
-
-def _plot_strategic(si: np.ndarray, out: Path) -> None:
-    fig, ax = plt.subplots(figsize=(7, 6), dpi=config.FIGURE_DPI)
-    im = ax.imshow(si, cmap="hot", origin="lower")
-    plt.colorbar(im, ax=ax, label="Strategic Importance (0–1)")
-    ax.set_title("Strategic Importance Map", fontsize=14, fontweight="bold")
-    ax.set_xlabel("Column (x)"); ax.set_ylabel("Row (y)")
-    _save(fig, out / "strategic_importance.png")
-
-
-def _plot_nfz_overlay(elev: np.ndarray, nfz: np.ndarray, out: Path) -> None:
-    fig, ax = plt.subplots(figsize=(7, 6), dpi=config.FIGURE_DPI)
-    im = ax.imshow(elev, cmap="terrain", origin="lower", alpha=0.8)
-    nfz_overlay = np.ma.masked_where(nfz == 0, nfz)
-    ax.imshow(nfz_overlay, cmap="Reds", origin="lower", alpha=0.6)
-    plt.colorbar(im, ax=ax, label="Elevation (normalised)")
-    red_patch = mpatches.Patch(color="red", alpha=0.6, label="No-Fly Zone")
-    ax.legend(handles=[red_patch], loc="lower right", fontsize=8)
-    ax.set_title("Elevation + No-Fly Zones", fontsize=14, fontweight="bold")
-    ax.set_xlabel("Column (x)"); ax.set_ylabel("Row (y)")
-    _save(fig, out / "nfz_overlay.png")
-
-
-def _plot_suitability(smap: np.ndarray, threat_type: str, out: Path) -> None:
-    fig, ax = plt.subplots(figsize=(7, 6), dpi=config.FIGURE_DPI)
-    im = ax.imshow(smap, cmap="viridis", origin="lower", vmin=0, vmax=1)
-    plt.colorbar(im, ax=ax, label="Suitability Score (0–1)")
-    ax.set_title(f"Placement Suitability — {threat_type.capitalize()}",
-                 fontsize=14, fontweight="bold")
-    ax.set_xlabel("Column (x)"); ax.set_ylabel("Row (y)")
-    _save(fig, out / f"suitability_{threat_type}.png")
-
-
-def _plot_sensor_placement(elev:    np.ndarray,
-                            sensors: List[ThreatSensor],
-                            out:     Path) -> None:
-    """
-    Final placement map: elevation background + ThreatSensor scatter overlay.
-
-    Markers and colours follow config.SENSOR_DEFINITIONS, keyed by threat_type.
-    Positions read from x_cell (column) and y_cell (row).
-    """
-    fig, ax = plt.subplots(figsize=(9, 8), dpi=config.FIGURE_DPI)
-    im = ax.imshow(elev, cmap="terrain", origin="lower", alpha=0.85)
-    plt.colorbar(im, ax=ax, label="Elevation (normalised)", shrink=0.75)
-
-    legend_handles = []
-    plotted_types  = set()
-
-    for s in sensors:
-        defn   = config.SENSOR_DEFINITIONS[s.threat_type]
-        colour = defn["color"]
-        marker = defn["marker"]
-
-        # Use grid-coordinate fields: x_cell = column, y_cell = row
-        ax.scatter(s.x_cell, s.y_cell,
-                   c=colour, marker=marker,
-                   s=config.SENSOR_MARKER_SIZE,
-                   edgecolors="white", linewidths=0.8,
-                   zorder=5)
-
-        if s.threat_type not in plotted_types:
-            legend_handles.append(
-                mpatches.Patch(color=colour,
-                               label=s.threat_type.capitalize())
+    def _overlay_nfz(self, ax: plt.Axes) -> None:
+        """Draw NFZ exclusion circles as dashed red outlines."""
+        for (nr, nc, radius) in self.lb.active_nfzs:
+            circle = plt.Circle(
+                (nc, nr), radius,
+                color='red', fill=False,
+                linestyle='--', linewidth=1.2, alpha=0.7,
             )
-            plotted_types.add(s.threat_type)
+            ax.add_patch(circle)
 
-    ax.legend(handles=legend_handles, loc="lower right",
-              fontsize=9, framealpha=0.9, title="Threat Type")
+    def _overlay_outposts(self, ax: plt.Axes) -> None:
+        """Draw strategic high-ground outposts matching terrain team style."""
+        if self.tg.high_ground_positions:
+            hx, hy = zip(*self.tg.high_ground_positions)
+            ax.scatter(
+                hy, hx,
+                color='white', marker='*', s=120,
+                edgecolor='black', linewidth=0.7,
+                zorder=5, label='Observation Outpost',
+            )
 
-    # Annotate sensor IDs at small font size
-    for s in sensors:
-        ax.text(s.x_cell + 0.8, s.y_cell + 0.8, str(s.id),
-                fontsize=5, color="white", zorder=6)
+    def _overlay_sensors(
+        self,
+        ax: plt.Axes,
+        placed: List[PlacedSensor],
+        sensor_type: Optional[str] = None,
+    ) -> List[mpatches.Patch]:
+        """
+        Scatter-plot sensors onto `ax`.
 
-    ax.set_title("Final Threat Sensor Placement", fontsize=15, fontweight="bold")
-    ax.set_xlabel("Column (x)"); ax.set_ylabel("Row (y)")
-    _save(fig, out / "sensor_placement.png")
+        Parameters
+        ----------
+        sensor_type : if given, only plot sensors of that type.
+                      If None, plot all types.
+
+        Returns
+        -------
+        List of legend patch handles.
+        """
+        pc  = self.cfg.placement
+        handles = []
+        plotted_types = set()
+
+        for st in SENSOR_TYPES:
+            if sensor_type and st.name != sensor_type:
+                continue
+
+            sensors = [p for p in placed if p.sensor_type == st.name]
+            if not sensors:
+                continue
+
+            rows = [s.row for s in sensors]
+            cols = [s.col for s in sensors]
+            color  = pc.colors[st.name]
+            marker = pc.markers[st.name]
+
+            ax.scatter(
+                cols, rows,
+                c=color, marker=marker,
+                s=pc.marker_size, edgecolor='black',
+                linewidth=0.8, zorder=6,
+                label=f"{st.label} (n={len(sensors)})",
+            )
+
+            # Add sensor ID text labels
+            for s in sensors:
+                ax.annotate(
+                    str(s.sensor_id),
+                    (s.col, s.row),
+                    textcoords='offset points', xytext=(4, 4),
+                    fontsize=5, color='white',
+                    fontweight='bold', zorder=7,
+                )
+
+            patch = mpatches.Patch(
+                color=color,
+                label=f"{st.label} (n={len(sensors)})"
+            )
+            handles.append(patch)
+            plotted_types.add(st.name)
+
+        return handles
+
+    # -----------------------------------------------------------------------
+    # Figure 1 — Terrain base + all sensors overlay
+    # -----------------------------------------------------------------------
+
+    def plot_terrain_with_sensors(
+        self, placed: List[PlacedSensor]
+    ) -> plt.Figure:
+        """
+        Primary output figure.
+
+        Layout:
+          - Terrain team base map (cmap + norm identical to tg.plot_2d)
+          - NFZ exclusion circles (dashed red)
+          - Strategic outposts (white stars)
+          - All sensor types overlaid with their symbols and ID labels
+          - Full legend in upper-right corner
+
+        This is "Terrain Team Map + Sensor Network Overlay" as specified.
+        """
+        fig, ax = plt.subplots(figsize=(10, 8), dpi=self._dpi)
+
+        # ── Terrain base (terrain team style) ──────────────────────────────
+        self._terrain_imshow(ax)
+
+        # ── NFZ exclusion zones ─────────────────────────────────────────────
+        self._overlay_nfz(ax)
+        nfz_patch = mpatches.Patch(
+            edgecolor='red', facecolor='none',
+            linestyle='--', linewidth=1.5,
+            label=f'NFZ ({len(self.lb.active_nfzs)} active)',
+        )
+
+        # ── Strategic outposts ──────────────────────────────────────────────
+        self._overlay_outposts(ax)
+        outpost_patch = mpatches.Patch(
+            color='white', label=f'Outpost ({len(self.tg.high_ground_positions)})',
+        )
+
+        # ── Sensor overlays ─────────────────────────────────────────────────
+        sensor_handles = self._overlay_sensors(ax, placed)
+
+        # ── Legend ──────────────────────────────────────────────────────────
+        all_handles = sensor_handles + [nfz_patch, outpost_patch]
+        ax.legend(
+            handles=all_handles,
+            loc='upper left', fontsize=7,
+            framealpha=0.85, edgecolor='white',
+        )
+
+        # ── Sensor count annotation ─────────────────────────────────────────
+        count_lines = [f"Total sensors: {len(placed)}"]
+        for st in SENSOR_TYPES:
+            n = sum(1 for p in placed if p.sensor_type == st.name)
+            count_lines.append(f"  {st.label}: {n}")
+        ax.text(
+            0.99, 0.01, '\n'.join(count_lines),
+            transform=ax.transAxes,
+            fontsize=6.5, verticalalignment='bottom',
+            horizontalalignment='right',
+            bbox=dict(boxstyle='round,pad=0.4', facecolor='black',
+                      alpha=0.65, edgecolor='white'),
+            color='white',
+        )
+
+        self._apply_grid_style(
+            ax, "UAV Sensor Network — Terrain + Placement Overlay"
+        )
+
+        fig.tight_layout()
+        if self.cfg.viz.show_plots:
+            plt.show(block=False)
+        return fig
+
+    # -----------------------------------------------------------------------
+    # Figure 2 — 2×2 suitability map grid
+    # -----------------------------------------------------------------------
+
+    def plot_suitability_grid(self, placed: List[PlacedSensor]) -> plt.Figure:
+        """
+        2×2 subplot grid showing the suitability map for each sensor type
+        with its placed sensors overlaid.
+
+        Each subplot:
+          - plasma colormap for the suitability score [0, 1]
+          - NFZ mask shown as dark overlay (alpha hatching)
+          - Placed sensors of that type only
+          - Colorbar labelled 'Suitability Score'
+        """
+        fig, axes = plt.subplots(2, 2, figsize=(13, 10), dpi=self._dpi)
+        axes_flat = axes.flatten()
+
+        nfz_display = np.ma.masked_where(
+            self.lb.nfz_mask == 0,
+            np.ones_like(self.lb.nfz_mask, dtype=float),
+        )
+
+        for idx, st in enumerate(SENSOR_TYPES):
+            ax   = axes_flat[idx]
+            suit = self.lb.suitability_maps[st.name]
+
+            # Suitability heatmap
+            img = ax.imshow(
+                suit, cmap='plasma', vmin=0, vmax=1, origin='lower',
+            )
+            cbar = plt.colorbar(img, ax=ax, shrink=0.85)
+            cbar.set_label('Suitability Score', fontsize=7)
+            cbar.ax.tick_params(labelsize=6)
+
+            # NFZ overlay (dark semi-transparent)
+            ax.imshow(
+                nfz_display, cmap='Reds', alpha=0.4,
+                vmin=0, vmax=1, origin='lower',
+            )
+
+            # Sensors of this type
+            self._overlay_sensors(ax, placed, sensor_type=st.name)
+
+            # Strategic outposts
+            self._overlay_outposts(ax)
+
+            n = sum(1 for p in placed if p.sensor_type == st.name)
+            self._apply_grid_style(
+                ax,
+                f"{st.label} Suitability  "
+                f"(w_e={self.cfg.weights.__dict__[st.weight_key]['elevation']:.2f}  "
+                f"w_v={self.cfg.weights.__dict__[st.weight_key]['visibility']:.2f}  "
+                f"w_s={self.cfg.weights.__dict__[st.weight_key]['strategic']:.2f})  "
+                f"— {n} placed"
+            )
+
+            ax.legend(fontsize=6, loc='upper right', framealpha=0.8)
+
+        fig.suptitle(
+            "Suitability Maps per Sensor Type  (red overlay = NFZ)",
+            fontsize=12, fontweight='bold', y=1.01,
+        )
+        fig.tight_layout()
+        if self.cfg.viz.show_plots:
+            plt.show(block=False)
+        return fig
+
+    # -----------------------------------------------------------------------
+    # Figure 3 — 2×2 input layer grid
+    # -----------------------------------------------------------------------
+
+    def plot_layer_grid(self) -> plt.Figure:
+        """
+        2×2 subplot grid of the four input layers:
+          [0,0] Elevation layer   (viridis)
+          [0,1] Strategic layer   (YlOrRd)
+          [1,0] Visibility layer  (RdYlGn)
+          [1,1] NFZ mask          (terrain base + NFZ circles)
+        """
+        fig, axes = plt.subplots(2, 2, figsize=(13, 10), dpi=self._dpi)
+
+        layers = [
+            (self.lb.elevation_layer,  'viridis', 'Elevation Layer  (normalised)'),
+            (self.lb.strategic_layer,  'YlOrRd',  'Strategic Importance Layer'),
+            (self.lb.visibility_layer, 'RdYlGn',  'Visibility Layer  (heuristic)'),
+        ]
+
+        for idx, (arr, cmap_name, title) in enumerate(layers):
+            ax  = axes.flatten()[idx]
+            img = ax.imshow(arr, cmap=cmap_name, vmin=0, vmax=1, origin='lower')
+            cbar = plt.colorbar(img, ax=ax, shrink=0.85)
+            cbar.set_label('Normalised Score [0–1]', fontsize=7)
+            cbar.ax.tick_params(labelsize=6)
+            self._apply_grid_style(ax, title)
+
+            # Mark strategic outposts on strategic layer subplot
+            if idx == 1:
+                self._overlay_outposts(ax)
+                if self.tg.high_ground_positions:
+                    ax.legend(fontsize=6, loc='upper right')
+
+        # Bottom-right: terrain base + NFZ exclusion zones
+        ax_nfz = axes[1][1]
+        self._terrain_imshow(ax_nfz)
+        self._overlay_nfz(ax_nfz)
+        nfz_patch = mpatches.Patch(
+            edgecolor='red', facecolor='none', linestyle='--',
+            label=f'NFZ  ({len(self.lb.active_nfzs)} active)',
+        )
+        ax_nfz.legend(handles=[nfz_patch], fontsize=7, loc='upper right')
+        self._apply_grid_style(
+            ax_nfz,
+            f"Active NFZ Mask  ({len(self.lb.active_nfzs)} zones, "
+            f"{int(self.lb.nfz_mask.sum())} cells restricted)"
+        )
+
+        fig.suptitle(
+            "Input Layers — Phase 2 Layer Builder",
+            fontsize=12, fontweight='bold', y=1.01,
+        )
+        fig.tight_layout()
+        if self.cfg.viz.show_plots:
+            plt.show(block=False)
+        return fig
+
+    # -----------------------------------------------------------------------
+    # Figure 4 — 3-D terrain surface (terrain team style, no sensors)
+    # -----------------------------------------------------------------------
+
+    def plot_elevation_3d(self) -> plt.Figure:
+        """
+        3-D surface plot following the terrain team's plot_3d() conventions:
+          - cmap='terrain', edgecolor='none', alpha=0.9
+          - view_init(elev=38, azim=-125)
+          - zlim(0, 1000)
+        High-ground outposts plotted as red scatter on the surface.
+        """
+        from mpl_toolkits.mplot3d import Axes3D   # noqa: F401
+
+        fig = plt.figure("3D Sensor Terrain", figsize=(11, 8), dpi=self._dpi)
+        ax  = fig.add_subplot(111, projection='3d')
+
+        n   = self.tg.grid_size
+        x   = np.arange(0, n)
+        y   = np.arange(0, n)
+        xx, yy = np.meshgrid(x, y)
+
+        # Surface — terrain team style
+        surf = ax.plot_surface(
+            xx, yy, self.tg.terrain,
+            cmap='terrain', edgecolor='none', alpha=0.9, linewidth=0,
+        )
+        fig.colorbar(
+            surf, ax=ax, shrink=0.5, aspect=10,
+            label='Elevation (Metres)',
+        )
+
+        # Strategic outposts on surface
+        for (pr, pc) in self.tg.high_ground_positions:
+            ax.scatter(
+                pc, pr, self.tg.terrain[pr, pc] + 15,
+                color='red', marker='^', s=80, zorder=5,
+            )
+
+        ax.set_title(
+            "3D Battlefield Terrain — Sensor Placement Reference",
+            fontweight='bold',
+        )
+        ax.set_xlabel("Grid X")
+        ax.set_ylabel("Grid Y")
+        ax.set_zlabel("Elevation (m)")
+        ax.set_zlim(0, 1000)
+        ax.view_init(elev=38, azim=-125)
+
+        fig.tight_layout()
+        if self.cfg.viz.show_plots:
+            plt.show(block=False)
+        return fig
+
+    # -----------------------------------------------------------------------
+    # Save helper
+    # -----------------------------------------------------------------------
+
+    def save(self, fig: plt.Figure, filename: str) -> str:
+        """
+        Save `fig` to cfg.viz.output_dir/<filename>.
+        Returns the full output path.
+        """
+        path = os.path.join(self.cfg.viz.output_dir, filename)
+        fig.savefig(path, dpi=self._dpi, bbox_inches='tight')
+        return path
 
 
+# ---------------------------------------------------------------------------
+# Self-test  (headless — saves PNGs, does not open windows)
+# ---------------------------------------------------------------------------
 
-# Utility
+if __name__ == "__main__":
+    import sys
+    import numpy as _np
+    import random as _random
 
+    sys.path.insert(0, ".")
+    matplotlib_backend = plt.get_backend()
 
-def _save(fig: plt.Figure, path: Path) -> None:
-    fig.tight_layout()
-    fig.savefig(path, dpi=config.FIGURE_DPI, bbox_inches="tight")
-    plt.close(fig)
-    print(f"[visualization] Saved {path.name}")
+    # Use non-interactive backend for self-test
+    plt.switch_backend('Agg')
+
+    from terraingeneration import TerrainGenerator
+    from config import DEFAULT_CONFIG, SensorPlacementConfig
+    from layer_builder import LayerBuilder
+    from placement_engine import PlacementEngine
+
+    seed = 42
+    _np.random.seed(seed)
+
+    tg = TerrainGenerator(
+        grid_size=100, scale=40.0, octaves=6,
+        persistence=0.5, lacunarity=2.0, seed=seed,
+    )
+    tg.generate_base_terrain()
+    tg.add_ridges(num_ridges=4, ridge_height=180, ridge_width=6.0)
+    tg.add_valleys(num_valleys=2, valley_depth=150, valley_width=10.0)
+    tg.classify_terrain()
+    tg.calculate_slope()
+    tg.generate_cost_map()
+
+    cfg = SensorPlacementConfig()
+    cfg.viz.show_plots = False   # headless
+
+    lb = LayerBuilder(tg, cfg)
+    engine = PlacementEngine(tg, lb, cfg)
+    placed = engine.place({'radar': 6, 'visual': 8, 'infrared': 6, 'acoustic': 8})
+
+    viz = Visualizer(tg, lb, cfg)
+
+    print("Rendering Figure 1: terrain + sensor overlay...")
+    fig1 = viz.plot_terrain_with_sensors(placed)
+    p1 = viz.save(fig1, "fig1_terrain_sensors.png")
+    print(f"  Saved → {p1}")
+
+    print("Rendering Figure 2: suitability grid...")
+    fig2 = viz.plot_suitability_grid(placed)
+    p2 = viz.save(fig2, "fig2_suitability_grid.png")
+    print(f"  Saved → {p2}")
+
+    print("Rendering Figure 3: layer grid...")
+    fig3 = viz.plot_layer_grid()
+    p3 = viz.save(fig3, "fig3_layer_grid.png")
+    print(f"  Saved → {p3}")
+
+    print("Rendering Figure 4: 3D elevation...")
+    fig4 = viz.plot_elevation_3d()
+    p4 = viz.save(fig4, "fig4_elevation_3d.png")
+    print(f"  Saved → {p4}")
+
+    # Verify files exist and are non-empty
+    import os
+    for path in [p1, p2, p3, p4]:
+        size = os.path.getsize(path)
+        assert size > 10_000, f"{path} suspiciously small ({size} bytes)"
+        print(f"PASS  {os.path.basename(path)}  ({size//1024} KB)")
+
+    plt.close('all')
+    print("\nAll visualization.py checks passed.")
