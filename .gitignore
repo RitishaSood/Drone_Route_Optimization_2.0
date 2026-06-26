@@ -1,5 +1,14 @@
 #Custom gitignore
+venv/
 venv311/
+.venv311/
+.venv/
+env_generator/venv/
+env_generator/venv311/
+
+# Python cache
+*.pyc
+*.pyo
 
 
 ### AL ###
