@@ -1,0 +1,155 @@
+1. Python scenario generation
+2. C++ compute engine
+3. Shared run data
+4. Backend/API layer
+5. Frontend/dashboard
+6. Scripts/deployment/config
+
+DroneRouteOptimization/
+│
+├── README.md
+├── .gitignore
+├── .env.example
+├── docker-compose.yml
+│
+├── data/
+│   └── .gitkeep
+│
+├── runs/
+│   └── .gitkeep
+│
+├── outputs/
+│   └── .gitkeep
+│
+├── python_generator/
+│   ├── main.py
+│   ├── requirements.txt
+│   ├── pytest.ini
+│   │
+│   ├── config/
+│   │   ├── __init__.py
+│   │   ├── terrain_config.py
+│   │   ├── sensor_config.py
+│   │   ├── placement_config.py
+│   │   └── export_config.py
+│   │
+│   ├── terrain/
+│   │   ├── __init__.py
+│   │   ├── terrain_constants.py
+│   │   ├── terrain_generator.py
+│   │   └── terrain_exporter.py
+│   │
+│   ├── placement/
+│   │   ├── __init__.py
+│   │   ├── sensor_types.py
+│   │   ├── placed_sensor.py
+│   │   ├── nfz.py
+│   │   ├── nfz_generator.py
+│   │   ├── layer_builder.py
+│   │   ├── placement_engine.py
+│   │   ├── strategic.py
+│   │   ├── visibility.py
+│   │   └── suitability.py
+│   │
+│   ├── export/
+│   │   ├── __init__.py
+│   │   └── exporter.py
+│   │
+│   ├── visualization/
+│   │   ├── __init__.py
+│   │   ├── terrain_plot.py
+│   │   ├── sensor_plot.py
+│   │   ├── suitability_plot.py
+│   │   ├── layer_plot.py
+│   │   ├── terrain_3d_plot.py
+│   │   ├── save_utils.py
+│   │   └── visualization_manager.py
+│   │
+│   └── tests/
+│       ├── test_nfz.py
+│       ├── test_exporter.py
+│       ├── test_end_to_end.py
+│       └── test_placement.py
+│
+├── cpp_engine/
+│   ├── CMakeLists.txt
+│   │
+│   ├── include/
+│   │   ├── States.h
+│   │   ├── CSVLoader.h
+│   │   ├── DroneDatabase.h
+│   │   ├── Threats.h
+│   │   ├── FieldGenerator.h
+│   │   └── FastMath.h
+│   │
+│   ├── src/
+│   │   ├── main.cpp
+│   │   ├── CSVLoader.cpp
+│   │   ├── Threats.cpp
+│   │   └── FieldGenerator.cpp
+│   │
+│   ├── tests/
+│   │   └── test_csv_loader.cpp
+│   │
+│   └── build/
+│
+├── backend/
+│   ├── package.json
+│   ├── server.js
+│   ├── .env.example
+│   │
+│   ├── src/
+│   │   ├── app.js
+│   │   ├── routes/
+│   │   │   ├── scenario.routes.js
+│   │   │   ├── compute.routes.js
+│   │   │   └── results.routes.js
+│   │   │
+│   │   ├── controllers/
+│   │   │   ├── scenario.controller.js
+│   │   │   ├── compute.controller.js
+│   │   │   └── results.controller.js
+│   │   │
+│   │   ├── services/
+│   │   │   ├── pythonRunner.service.js
+│   │   │   ├── cppRunner.service.js
+│   │   │   ├── runManager.service.js
+│   │   │   └── fileService.js
+│   │   │
+│   │   └── utils/
+│   │       └── paths.js
+│
+├── frontend/
+│   ├── package.json
+│   ├── vite.config.js
+│   ├── index.html
+│   │
+│   └── src/
+│       ├── App.jsx
+│       ├── main.jsx
+│       ├── pages/
+│       │   ├── Dashboard.jsx
+│       │   ├── ScenarioConfig.jsx
+│       │   └── Results.jsx
+│       │
+│       ├── components/
+│       │   ├── TerrainMap.jsx
+│       │   ├── HeatmapViewer.jsx
+│       │   ├── SensorOverlay.jsx
+│       │   └── PathViewer.jsx
+│       │
+│       └── api/
+│           └── client.js
+│
+├── scripts/
+│   ├── setup_python.ps1
+│   ├── build_cpp.ps1
+│   ├── run_pipeline.ps1
+│   ├── clean.ps1
+│   └── run_tests.ps1
+│
+└── docs/
+    ├── architecture.md
+    ├── csv_schema.md
+    ├── runbook.md
+    └── model_assumptions.md
