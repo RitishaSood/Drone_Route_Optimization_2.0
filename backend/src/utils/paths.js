@@ -5,19 +5,21 @@ function getRunsRoot() {
 }
 
 function getRunPaths(runId) {
-  assertSafePathSegment(runId, "runId");
+  assertRunId(runId);
 
   const runDir = path.join(getRunsRoot(), runId);
   const configDir = path.join(runDir, "config");
   const dataDir = path.join(runDir, "data");
-  const outputsDir = path.join(runDir, "outputs");
-  const plotsDir = path.join(runDir, "plots");
+  const csvDir = path.join(dataDir, "csv");
+  const outputsDir = path.join(dataDir, "outputs");
+  const plotsDir = path.join(dataDir, "plots");
   const logsDir = path.join(runDir, "logs");
 
   return {
     runDir,
     configDir,
     dataDir,
+    csvDir,
     outputsDir,
     plotsDir,
     logsDir,
@@ -41,22 +43,33 @@ function resolveSafeRunFile(directory, filename) {
   return resolvedFile;
 }
 
-function assertSafePathSegment(value, label) {
+function assertRunId(value) {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
-    value.includes("..") ||
-    value.includes("/") ||
-    value.includes("\\")
+    value.length > 100 ||
+    !/^[A-Za-z0-9_-]+$/.test(value)
   ) {
-    const error = new Error(`Invalid ${label}`);
+    const error = new Error("Invalid runId");
     error.statusCode = 400;
     throw error;
   }
 }
 
-function assertSafeFilename(filename) {
-  assertSafePathSegment(filename, "filename");
+function assertSafeFilename(value) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 100 ||
+    value.includes("..") ||
+    value.includes("/") ||
+    value.includes("\\") ||
+    !/^[A-Za-z0-9._-]+$/.test(value)
+  ) {
+    const error = new Error("Invalid filename");
+    error.statusCode = 400;
+    throw error;
+  }
 }
 
 module.exports = {

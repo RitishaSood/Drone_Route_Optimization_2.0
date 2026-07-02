@@ -5,6 +5,12 @@ venv311/
 .venv/
 env_generator/venv/
 env_generator/venv311/
+runs/
+data/csv/
+data/outputs/
+data/plots/
+outputs/
+plots/
 
 # Python cache
 *.pyc

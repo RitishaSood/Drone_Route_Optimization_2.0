@@ -1,6 +1,10 @@
 .git
 .gitignore
 **/scripts/run_all.ps1
+new_ui/
+frotneend/
+frontend_old/
+old_frontend/
 
 **/__pycache__/
 **/*.pyc
@@ -16,6 +20,8 @@
 **/venv3/
 
 cpp_engine/build/
+pipeline/cpp_engine/build/
+pipeline/path_planner/build/
 build/
 cmake-build-*/
 **/CMakeFiles/
@@ -27,6 +33,12 @@ cmake-build-*/
 
 **/node_modules/
 **/npm-debug.log
+frontend/node_modules/
+frontend/dist/
+frontend/dist/
+backend/node_modules/
+frontend/node_modules/
+pipeline/env_generator/plots/
 
 **/.DS_Store
 **/Thumbs.db
@@ -39,8 +51,11 @@ cmake-build-*/
 **/secrets.dev.yaml
 **/values.dev.yaml
 
-plots/*.png
-outputs/*.csv
+data/
+runs/
+data/csv/*.csv
+data/outputs/*.csv
+data/plots/*.png
 
 README.md
 LICENSE

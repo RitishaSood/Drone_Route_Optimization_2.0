@@ -26,12 +26,14 @@ const runSchema = new mongoose.Schema(
       terrainSeed: Number,
       nfzCount: Number,
       droneName: String,
-      placementMode: String
+      placementMode: String,
+      algorithm: String
     },
     paths: {
       runDir: String,
       configDir: String,
       dataDir: String,
+      csvDir: String,
       outputsDir: String,
       plotsDir: String,
       logsDir: String,
