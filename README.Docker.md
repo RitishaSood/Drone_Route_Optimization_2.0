@@ -3,7 +3,21 @@
 When you're ready, start your application by running:
 `docker compose up --build`.
 
-Your application will be available at http://localhost:8000.
+Your application will be available at http://localhost:5173.
+
+### UAV pipeline commands
+
+Build the image:
+
+`docker compose build`
+
+Run the existing root-folder workflow:
+
+`docker compose run --rm pipeline`
+
+Run an isolated sample scenario folder:
+
+`docker compose run --rm -e RUN_DIR=/app/runs/sample_run pipeline`
 
 ### Deploying your application to the cloud
 

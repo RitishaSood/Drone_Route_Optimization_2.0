@@ -1,0 +1,109 @@
+const expressMongoSanitize = require("express-mongo-sanitize");
+const cors = require("cors");
+const express = require("express");
+const helmet = require("helmet");
+const hpp = require("hpp");
+const rateLimit = require("express-rate-limit");
+const morgan = require("morgan");
+
+const runRoutes = require("./routes/run.routes");
+
+const app = express();
+
+app.disable("x-powered-by");
+
+if (String(process.env.TRUST_PROXY).toLowerCase() === "true") {
+  app.set("trust proxy", 1);
+}
+
+const allowedOrigins = String(process.env.CORS_ORIGIN || "http://localhost:5173")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    const error = new Error("CORS origin not allowed");
+    error.statusCode = 403;
+    callback(error);
+  },
+  credentials: false
+};
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: "Too many requests. Please try again later."
+    });
+  }
+});
+
+app.use(
+  helmet.contentSecurityPolicy({
+    useDefaults: false,
+    directives: {
+      defaultSrc: ["'none'"],
+      baseUri: ["'none'"],
+      frameAncestors: ["'none'"],
+      formAction: ["'none'"]
+    }
+  })
+);
+app.use(helmet.frameguard({ action: "deny" }));
+app.use(helmet.noSniff());
+app.use(helmet.referrerPolicy({ policy: "no-referrer" }));
+app.use(helmet.hidePoweredBy());
+app.use((req, res, next) => {
+  res.setHeader(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+  );
+  next();
+});
+app.use(cors(corsOptions));
+app.use(express.json({ limit: "100kb" }));
+app.use(express.urlencoded({ extended: false, limit: "100kb" }));
+app.use(expressMongoSanitize());
+app.use(hpp());
+app.use(morgan("dev"));
+app.use("/api", apiLimiter);
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true });
+});
+
+app.use("/api/runs", runRoutes);
+
+app.use((req, res) => {
+  res.status(404).json({
+    error: "Not found",
+    path: req.originalUrl
+  });
+});
+
+app.use((error, _req, res, _next) => {
+  const status =
+    error.statusCode ||
+    error.status ||
+    (error.type === "entity.too.large" ? 413 : 500);
+  const payload = {
+    error: error.message || "Internal server error"
+  };
+
+  if (error.details && Array.isArray(error.details)) {
+    payload.details = error.details;
+  }
+
+  res.status(status).json(payload);
+});
+
+module.exports = app;

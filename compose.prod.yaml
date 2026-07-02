@@ -1,0 +1,78 @@
+services:
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: uav-route-backend:latest
+    environment:
+      PORT: 5000
+      MONGO_URI: mongodb://mongo:27017/drone_route_optimization
+      RUNS_DIR: /app/runs
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://your-domain.com}
+      TRUST_PROXY: "true"
+      NODE_ENV: production
+    depends_on:
+      - mongo
+    volumes:
+      - ./runs:/app/runs
+    expose:
+      - "5000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+    image: uav-route-frontend:latest
+    depends_on:
+      - backend
+    expose:
+      - "80"
+    restart: unless-stopped
+
+  pipeline-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTHON_VERSION: 3.11-slim
+        CMAKE_BUILD_TYPE: Release
+        CPP_EXECUTABLE_NAME: uav_pipeline
+    image: uav-route-optimization:latest
+    working_dir: /app
+    environment:
+      MONGO_URI: mongodb://mongo:27017/drone_route_optimization
+      RUNS_DIR: /app/runs
+    depends_on:
+      - mongo
+    volumes:
+      - ./runs:/app/runs
+    command: python pipeline/scripts/worker.py
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    depends_on:
+      - backend
+      - frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
+  caddy_data:
+  caddy_config:
