@@ -1,4 +1,5 @@
 const Run = require("../models/Run");
+const artifactService = require("../services/artifactService");
 const fileService = require("../services/fileService");
 const runManager = require("../services/runManager.service");
 const {
@@ -86,6 +87,19 @@ async function getRunAlgorithmMetrics(req, res, next) {
   }
 }
 
+async function getRunArtifacts(req, res, next) {
+  try {
+    validateRunId(req.params.runId);
+    await findRunOrThrow(req.params.runId);
+
+    const artifacts = await artifactService.discoverArtifacts(req.params.runId);
+
+    res.json(artifacts);
+  } catch (error) {
+    next(error);
+  }
+}
+
 async function getRunLogs(req, res, next) {
   try {
     validateRunId(req.params.runId);
@@ -138,6 +152,7 @@ module.exports = {
   getRun,
   getRunStatus,
   getRunAlgorithmMetrics,
+  getRunArtifacts,
   getRunLogs,
   getRunPlot,
   getRunFile

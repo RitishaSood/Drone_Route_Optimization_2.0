@@ -23,8 +23,19 @@ from pipeline.path_planner.export.planner_exporter import (  # noqa: E402
     export_algorithm_metrics_json,
     export_path_csv,
 )
+from pipeline.path_planner.algorithms.lazy3dastar import run_lazy_3d_astar  # noqa: E402
 from pipeline.path_planner.io.cost_loader import load_cost_matrix  # noqa: E402
+from pipeline.env_generator.io.csv_loader import CSVLoader  # noqa: E402
 from pipeline.path_planner.metrics.metrics import enrich_algorithm_result  # noqa: E402
+from pipeline.path_planner.metrics.metrics import calculate_path_cumulative_costs  # noqa: E402
+from pipeline.path_planner.visualization.path_plots import (  # noqa: E402
+    save_comparison_plot,
+    save_lazy_3d_profiles,
+    save_lazy_3d_route_over_terrain,
+    save_lazy_3d_route_plot,
+    save_lazy_3d_stats_summary,
+    save_path_plot,
+)
 
 
 def get_run_root() -> Path:
@@ -102,6 +113,7 @@ def load_context() -> dict[str, Any]:
     end_y = parse_int(values, "END_Y", 99)
     start_z = parse_int(values, "START_Z", flight_z)
     end_z = parse_int(values, "END_Z", flight_z)
+    planning_mode = values.get("PLANNING_MODE", "2.5D")
 
     if start_x == end_x and start_y == end_y:
         raise ValueError("Start and end cannot be identical")
@@ -123,6 +135,7 @@ def load_context() -> dict[str, Any]:
         "env_path": env_path,
         "values": values,
         "final_cost_file": get_outputs_dir(run_root) / "final_cost.csv",
+        "terrain_height_file": get_data_root(run_root) / "csv" / "terrain_height.csv",
         "outputs_dir": get_outputs_dir(run_root),
         "plots_dir": get_plots_dir(run_root),
         "start_xy": (start_x, start_y),
@@ -134,6 +147,8 @@ def load_context() -> dict[str, Any]:
         "cell_scale_m": parse_float(values, "CELL_SCALE_M", 1000.0),
         "algorithms": algorithms,
         "threat_threshold": parse_float(values, "THREAT_THRESHOLD", 999999.0),
+        "planning_mode": planning_mode,
+        "use_lazy_3d": values.get("USE_LAZY_3D", "false").lower() == "true",
     }
 
 
@@ -141,6 +156,28 @@ def run_algorithms(cost_matrix: np.ndarray, context: dict[str, Any]) -> list[dic
     run_id = os.environ.get("RUN_ID", "")
     profile = get_drone_fuel_profile(context["drone_name"])
     results: list[dict] = []
+
+    if context["planning_mode"] == "3D" or context["use_lazy_3d"]:
+        terrain_height = None
+        terrain_height_file = context.get("terrain_height_file")
+        if terrain_height_file and Path(terrain_height_file).exists():
+            try:
+                terrain_height = CSVLoader.load_height(terrain_height_file)
+            except Exception:
+                terrain_height = None
+
+        result = run_lazy_3d_astar(
+            cost_matrix=cost_matrix,
+            start_xyz=(context["start_xy"][0], context["start_xy"][1], context["start_z"]),
+            goal_xyz=(context["goal_xy"][0], context["goal_xy"][1], context["end_z"]),
+            terrain_height=terrain_height,
+            z_min=parse_int(context["values"], "Z_MIN", 0),
+            z_max=parse_int(context["values"], "Z_MAX", 99),
+            preferred_z=parse_int(context["values"], "PREFERRED_Z", context["flight_z"]),
+            altitude_penalty_weight=parse_float(context["values"], "ALTITUDE_PENALTY_WEIGHT", 1.0),
+            threat_threshold=context["threat_threshold"],
+        )
+        return [result]
 
     runners = {
         "dijkstra": run_dijkstra,
@@ -207,11 +244,11 @@ def export_paths_and_plots(cost_matrix: np.ndarray, results: list[dict], context
     for result in results:
         path = result.get("path", [])
         path_rows = []
-        cumulative_cost = 0.0
         cumulative_distance = 0.0
         prev_point: dict[str, Any] | None = None
+        cumulative_costs = calculate_path_cumulative_costs(cost_matrix, path)
 
-        for point in path:
+        for index, point in enumerate(path):
             x = int(point["x"])
             y = int(point["y"])
             cost = float(cost_matrix[y, x])
@@ -219,26 +256,41 @@ def export_paths_and_plots(cost_matrix: np.ndarray, results: list[dict], context
                 dx = x - int(prev_point["x"])
                 dy = y - int(prev_point["y"])
                 cumulative_distance += (dx * dx + dy * dy) ** 0.5
-                cumulative_cost += cost
-            else:
-                cumulative_cost = cost
             path_rows.append(
                 {
                     "x": x,
                     "y": y,
                     "z": int(point["z"]),
                     "cost": cost,
-                    "cumulative_cost": cumulative_cost,
+                    "cumulative_cost": cumulative_costs[index] if index < len(cumulative_costs) else cost,
                     "distance_km": cumulative_distance * (context["cell_scale_m"] / 1000.0),
                 }
             )
             prev_point = point
 
         export_path_csv(outputs_dir / str(result["pathCsv"]), path_rows)
-        # Algorithm visualization is intentionally omitted for now.
+        path_plot_name = str(result.get("pathPlot") or "")
+        if path:
+            if result.get("algorithm") == "lazy-3d-astar":
+                terrain_height_file = context.get("terrain_height_file")
+                terrain_height = None
+                if terrain_height_file and Path(terrain_height_file).exists():
+                    try:
+                        terrain_height = CSVLoader.load_height(terrain_height_file)
+                    except Exception:
+                        terrain_height = None
+                if terrain_height is None:
+                    terrain_height = np.zeros_like(cost_matrix)
+                save_lazy_3d_route_plot(path, plots_dir / path_plot_name)
+                save_lazy_3d_route_over_terrain(path, terrain_height, plots_dir / "lazy_3d_route_over_terrain.png")
+                save_lazy_3d_profiles(path, plots_dir, cumulative_costs)
+                save_lazy_3d_stats_summary(result, plots_dir / "lazy_3d_stats_summary.png")
+            elif path_plot_name:
+                save_path_plot(cost_matrix, result, plots_dir / path_plot_name)
 
     export_algorithm_metrics_json(outputs_dir / "algorithm_metrics.json", results)
     export_algorithm_metrics_csv(outputs_dir / "algorithm_metrics.csv", results)
+    save_comparison_plot(results, plots_dir / "algorithm_comparison.png")
 
 
 def main() -> int:

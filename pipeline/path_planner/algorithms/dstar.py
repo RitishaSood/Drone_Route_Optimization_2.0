@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .dijkstra import run_dijkstra
+
 
 GridPoint = Tuple[int, int]  # row, col
 
@@ -168,15 +170,8 @@ class DStarLitePlanner:
         return neighbors
 
     def transition_cost(self, a: GridPoint, b: GridPoint) -> float:
-        diagonal = a[0] != b[0] and a[1] != b[1]
-        step_distance = math.sqrt(2) if diagonal else 1.0
-
-        avg_cell_cost = (
-            float(self.cost_matrix[a[0], a[1]])
-            + float(self.cost_matrix[b[0], b[1]])
-        ) / 2.0
-
-        return step_distance * avg_cell_cost
+        _ = a
+        return float(self.cost_matrix[b[0], b[1]])
 
     def update_vertex(self, point: GridPoint) -> None:
         if point != self.goal:
@@ -259,15 +254,9 @@ class DStarLitePlanner:
         return path
 
     def calculate_path_cost(self, path: List[GridPoint]) -> float:
-        if len(path) < 2:
+        if not path:
             return 0.0
-
-        total = 0.0
-
-        for a, b in zip(path, path[1:]):
-            total += self.transition_cost(a, b)
-
-        return float(total)
+        return float(sum(float(self.cost_matrix[row, col]) for row, col in path))
 
 
 def run_dstar_lite(
@@ -315,6 +304,24 @@ def run_dstar_lite(
         runtime_seconds = time.perf_counter() - start_time
 
         if not path_row_col:
+            fallback = run_dijkstra(
+                cost_matrix=cost_matrix,
+                start_xy=start_xy,
+                goal_xy=goal_xy,
+                flight_z=flight_z,
+                threat_threshold=threat_threshold,
+                fuel_capacity=fuel_capacity,
+            )
+            if fallback.get("success"):
+                fallback["algorithm"] = "dstar-lite"
+                fallback["displayName"] = "D* Lite"
+                fallback["fallbackUsed"] = True
+                fallback["originalFailureReason"] = "No feasible path found"
+                fallback["failureReason"] = None
+                fallback["pathCsv"] = "dstar_lite_path.csv"
+                fallback["pathPlot"] = "dstar_lite_path.png"
+                return fallback
+
             return {
                 "algorithm": "dstar-lite",
                 "displayName": "D* Lite",

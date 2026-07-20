@@ -1,5 +1,10 @@
 import {
-  createContext, useCallback, useContext, useEffect, useMemo, useState,
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
   type ReactNode,
 } from "react";
 import type { ScenarioConfig, SensorRow } from "@/lib/uav-api";
@@ -7,6 +12,7 @@ import type { ScenarioConfig, SensorRow } from "@/lib/uav-api";
 const CLIENT_ID_KEY = "uav.clientId";
 
 export const DEFAULT_CONFIG: ScenarioConfig = {
+  planningMode: "2.5D",
   flightZ: 50,
   route: { start: { x: 0, y: 0, z: 50 }, end: { x: 99, y: 99, z: 50 } },
   terrainSeed: 42,
@@ -16,6 +22,14 @@ export const DEFAULT_CONFIG: ScenarioConfig = {
   sensorCount: 20,
   sensorCounts: { radar: 0, ir: 0, acoustic: 0, visual: 0 },
   manualSensors: [],
+  coverageConfig: {
+    coverageTargetEnabled: true,
+    targetCoveragePercent: 0.92,
+    coverageThreshold: 0.92,
+    minimumSensorSpacing: 10,
+    maxSensors: 64,
+    useQuadrantDistribution: true,
+  },
   inputMode: "generated",
   inputSources: {
     terrain_height: "generated",
@@ -28,17 +42,49 @@ export const DEFAULT_CONFIG: ScenarioConfig = {
   placementMode: "greedy",
   algorithmMode: "run-all",
   algorithms: ["dijkstra", "astar", "ant-colony", "theta-star", "dstar-lite"],
+  ewJammingEnabled: false,
+  environmentEnabled: false,
+  environment: {
+    windEnabled: false,
+    windSpeed: 0,
+    windDirection: 0,
+    gustSpeed: 0,
+    rainEnabled: false,
+    rainIntensity: 0,
+    fogEnabled: false,
+    fogIntensity: 0,
+    snowEnabled: false,
+    snowIntensity: 0,
+    hailEnabled: false,
+    hailIntensity: 0,
+    turbulenceEnabled: false,
+    turbulenceIntensity: 0,
+    temperatureEnabled: false,
+    temperatureC: 20,
+    thunderstormEnabled: false,
+    thunderstorm: false,
+  },
 };
 
-export interface ValidationIssue { field: string; message: string; blocking: boolean }
+export interface ValidationIssue {
+  field: string;
+  message: string;
+  blocking: boolean;
+}
 
 export function validateScenario(cfg: ScenarioConfig): ValidationIssue[] {
   const errs: ValidationIssue[] = [];
   const intIn = (n: number, min: number, max: number) =>
     Number.isInteger(n) && n >= min && n <= max;
+  const addWarning = (field: string, message: string) =>
+    errs.push({ field, message, blocking: false });
 
   if (!intIn(cfg.flightZ, 0, 100))
-    errs.push({ field: "flightZ", message: "Flight altitude must be an integer 0–100.", blocking: true });
+    errs.push({
+      field: "flightZ",
+      message: "Flight altitude must be an integer 0–100.",
+      blocking: true,
+    });
   if (!intIn(cfg.route.start.x, 0, 99))
     errs.push({ field: "route.start.x", message: "Start X must be 0–99.", blocking: true });
   if (!intIn(cfg.route.start.y, 0, 99))
@@ -48,15 +94,45 @@ export function validateScenario(cfg: ScenarioConfig): ValidationIssue[] {
   if (!intIn(cfg.route.end.y, 0, 99))
     errs.push({ field: "route.end.y", message: "End Y must be 0–99.", blocking: true });
   if (cfg.route.start.x === cfg.route.end.x && cfg.route.start.y === cfg.route.end.y)
-    errs.push({ field: "route", message: "Start and end points cannot be identical.", blocking: true });
+    errs.push({
+      field: "route",
+      message: "Start and end points cannot be identical.",
+      blocking: true,
+    });
+  if (cfg.planningMode === "3D") {
+    if (intIn(cfg.route.start.z, 0, 100) && cfg.route.start.z <= 0) {
+      addWarning(
+        "route.start.z",
+        "Start Z is at terrain level. If it is below the generated terrain height, 3D planning can fail."
+      );
+    }
+    if (intIn(cfg.route.end.z, 0, 100) && cfg.route.end.z <= 0) {
+      addWarning(
+        "route.end.z",
+        "End Z is at terrain level. If it is below the generated terrain height, 3D planning can fail."
+      );
+    }
+  }
 
   if (!intIn(cfg.terrainSeed, 0, 2147483647))
-    errs.push({ field: "terrainSeed", message: "Terrain seed must be an integer 0–2,147,483,647.", blocking: true });
+    errs.push({
+      field: "terrainSeed",
+      message: "Terrain seed must be an integer 0–2,147,483,647.",
+      blocking: true,
+    });
 
   if (cfg.threatTypes.length === 0)
-    errs.push({ field: "threatTypes", message: "Select at least one threat type.", blocking: true });
+    errs.push({
+      field: "threatTypes",
+      message: "Select at least one threat type.",
+      blocking: true,
+    });
   if (!intIn(cfg.nfzCount, 0, 100))
-    errs.push({ field: "nfzCount", message: "NFZ count must be an integer 0–100.", blocking: true });
+    errs.push({
+      field: "nfzCount",
+      message: "NFZ count must be an integer 0–100.",
+      blocking: true,
+    });
 
   if (cfg.sensorMode === "auto") {
     if (!intIn(cfg.sensorCount, 0, 1000))
@@ -66,24 +142,82 @@ export function validateScenario(cfg: ScenarioConfig): ValidationIssue[] {
     const total = c.radar + c.ir + c.acoustic + c.visual;
     (["radar", "ir", "acoustic", "visual"] as const).forEach((k) => {
       if (!Number.isInteger(c[k]) || c[k] < 0)
-        errs.push({ field: `sensorCounts.${k}`, message: `${k} sensor count must be a non-negative integer.`, blocking: true });
+        errs.push({
+          field: `sensorCounts.${k}`,
+          message: `${k} sensor count must be a non-negative integer.`,
+          blocking: true,
+        });
     });
     if (total > 1000)
-      errs.push({ field: "sensorCounts", message: "Total sensor count must be ≤ 1000.", blocking: true });
+      errs.push({
+        field: "sensorCounts",
+        message: "Total sensor count must be ≤ 1000.",
+        blocking: true,
+      });
   } else if (cfg.sensorMode === "manual-table") {
     if (cfg.manualSensors.length === 0)
-      errs.push({ field: "manualSensors", message: "Add at least one sensor row or switch mode.", blocking: true });
+      errs.push({
+        field: "manualSensors",
+        message: "Add at least one sensor row or switch mode.",
+        blocking: true,
+      });
     const ids = new Set<string>();
     cfg.manualSensors.forEach((s, i) => {
-      if (!s.id) errs.push({ field: `manualSensors[${i}].id`, message: `Row ${i + 1}: id required.`, blocking: true });
-      else if (ids.has(s.id)) errs.push({ field: `manualSensors[${i}].id`, message: `Row ${i + 1}: duplicate id "${s.id}".`, blocking: true });
+      if (!s.id)
+        errs.push({
+          field: `manualSensors[${i}].id`,
+          message: `Row ${i + 1}: id required.`,
+          blocking: true,
+        });
+      else if (ids.has(s.id))
+        errs.push({
+          field: `manualSensors[${i}].id`,
+          message: `Row ${i + 1}: duplicate id "${s.id}".`,
+          blocking: true,
+        });
       else ids.add(s.id);
-      if (!s.sensor_type) errs.push({ field: `manualSensors[${i}].sensor_type`, message: `Row ${i + 1}: sensor_type required.`, blocking: true });
-      if (!intIn(s.x, 0, 99)) errs.push({ field: `manualSensors[${i}].x`, message: `Row ${i + 1}: x must be 0–99.`, blocking: true });
-      if (!intIn(s.y, 0, 99)) errs.push({ field: `manualSensors[${i}].y`, message: `Row ${i + 1}: y must be 0–99.`, blocking: true });
-      if (!intIn(s.z, 0, 100)) errs.push({ field: `manualSensors[${i}].z`, message: `Row ${i + 1}: z must be 0–100.`, blocking: true });
-      if (!s.class) errs.push({ field: `manualSensors[${i}].class`, message: `Row ${i + 1}: class required.`, blocking: true });
+      if (!s.sensor_type)
+        errs.push({
+          field: `manualSensors[${i}].sensor_type`,
+          message: `Row ${i + 1}: sensor_type required.`,
+          blocking: true,
+        });
+      if (!intIn(s.x, 0, 99))
+        errs.push({
+          field: `manualSensors[${i}].x`,
+          message: `Row ${i + 1}: x must be 0–99.`,
+          blocking: true,
+        });
+      if (!intIn(s.y, 0, 99))
+        errs.push({
+          field: `manualSensors[${i}].y`,
+          message: `Row ${i + 1}: y must be 0–99.`,
+          blocking: true,
+        });
+      if (!intIn(s.z, 0, 100))
+        errs.push({
+          field: `manualSensors[${i}].z`,
+          message: `Row ${i + 1}: z must be 0–100.`,
+          blocking: true,
+        });
+      if (!s.class)
+        errs.push({
+          field: `manualSensors[${i}].class`,
+          message: `Row ${i + 1}: class required.`,
+          blocking: true,
+        });
     });
+  }
+
+  if (cfg.environmentEnabled) {
+    const env = cfg.environment;
+    if (!env) {
+      errs.push({
+        field: "environment",
+        message: "Environment settings are missing.",
+        blocking: true,
+      });
+    }
   }
 
   return errs;

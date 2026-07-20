@@ -20,14 +20,8 @@ const runSchema = new mongoose.Schema(
       index: true
     },
     config: {
-      flightZ: Number,
-      sensorCount: Number,
-      threatTypes: [String],
-      terrainSeed: Number,
-      nfzCount: Number,
-      droneName: String,
-      placementMode: String,
-      algorithm: String
+      type: mongoose.Schema.Types.Mixed,
+      default: {}
     },
     paths: {
       runDir: String,

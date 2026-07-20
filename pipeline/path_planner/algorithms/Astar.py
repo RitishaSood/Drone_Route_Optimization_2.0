@@ -131,7 +131,7 @@ class AStarPlanner:
             if current == goal:
                 runtime_seconds = time.perf_counter() - start_time
                 path = self._reconstruct_path(came_from, current, start)
-                total_cost = float(g_score[goal])
+                total_cost = self._path_total_cost(path)
 
                 return {
                     "success": True,
@@ -177,6 +177,9 @@ class AStarPlanner:
             nodes_visited=nodes_visited,
         )
 
+    def _path_total_cost(self, path: List[GridPoint]) -> float:
+        return float(sum(float(self.cost_matrix[row, col]) for row, col in path))
+
     def _reconstruct_path(
         self,
         came_from: Dict[GridPoint, GridPoint],
@@ -216,6 +219,7 @@ def run_astar(
     heuristic_type: str = "octile",
     threat_threshold: float = 999999.0,
     fuel_capacity: Optional[float] = None,
+    transition_cost_adapter: Any | None = None,
 ) -> Dict[str, Any]:
     """
     Pipeline-friendly A* entry point.
@@ -267,4 +271,5 @@ def run_astar(
         "failureReason": raw["failure_reason"],
         "pathCsv": "astar_path.csv",
         "pathPlot": "astar_path.png",
+        "transitionAware": transition_cost_adapter is not None,
     }

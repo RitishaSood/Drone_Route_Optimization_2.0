@@ -11,6 +11,16 @@ CPP_EXE="${CPP_EXECUTABLE_NAME:-uav_pipeline}"
 
 export MPLBACKEND=Agg
 
+now_ms() {
+    date +%s%3N
+}
+
+perf_pipeline_start="$(now_ms)"
+perf_python_start=""
+perf_cpp_start=""
+perf_final_cost_start=""
+perf_path_planner_start=""
+
 if [ "${RUN_DIR:-}" ]; then
     case "$RUN_DIR" in
         /*) ACTIVE_RUN_DIR="$RUN_DIR" ;;
@@ -29,6 +39,7 @@ fi
 CSV_DIR="$DATA_ROOT_DIR/csv"
 PLOTS_DIR="$DATA_ROOT_DIR/plots"
 OUTPUTS_DIR="$DATA_ROOT_DIR/outputs"
+perf_summary_file="$OUTPUTS_DIR/performance_summary.json"
 
 echo ""
 echo "[INFO] Root directory: $ROOT_DIR"
@@ -72,6 +83,7 @@ echo "[OK] Cleaned active data, plots, outputs, and logs folders while keeping .
 echo ""
 echo "[2] Running Python generator"
 
+perf_python_start="$(now_ms)"
 cd "$ROOT_DIR"
 python pipeline/env_generator/main.py
 
@@ -111,6 +123,7 @@ echo "[OK] Found C++ executable: $CPP_EXE"
 echo ""
 echo "[5] Running C++ engine"
 
+perf_cpp_start="$(now_ms)"
 cd "$ROOT_DIR"
 "$CPP_EXE"
 
@@ -140,6 +153,7 @@ FINAL_COST_PLOT_SCRIPT="$PYTHON_DIR/visualization/finalcsv.py"
 
 if [ -f "$FINAL_COST_PLOT_SCRIPT" ]; then
     echo "[INFO] Generating final cost plots..."
+    perf_final_cost_start="$(now_ms)"
     python pipeline/env_generator/visualization/finalcsv.py
     echo "[OK] Final cost plots generated"
 else
@@ -159,9 +173,55 @@ else
     fi
 
     echo "[INFO] Running path planner..."
+    perf_path_planner_start="$(now_ms)"
     python pipeline/path_planner/main.py
     echo "[OK] Path planner completed"
 fi
+
+perf_end="$(now_ms)"
+
+python - <<'PY' "$perf_summary_file" "$perf_pipeline_start" "$perf_python_start" "$perf_cpp_start" "$perf_final_cost_start" "$perf_path_planner_start" "$perf_end"
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+start = int(sys.argv[2])
+python_start = int(sys.argv[3]) if sys.argv[3] else None
+cpp_start = int(sys.argv[4]) if sys.argv[4] else None
+final_cost_start = int(sys.argv[5]) if sys.argv[5] else None
+path_planner_start = int(sys.argv[6]) if sys.argv[6] else None
+end = int(sys.argv[7])
+
+summary = {
+    "terrain_generation_ms": None,
+    "sensor_generation_ms": None,
+    "cpp_field_generation_ms": None,
+    "final_cost_generation_ms": None,
+    "path_planning_ms": None,
+    "lazy_3d_astar_ms": None,
+    "monte_carlo_ms": None,
+    "plot_generation_ms": None,
+    "artifact_discovery_ms": None,
+    "total_pipeline_ms": end - start,
+}
+
+if python_start:
+    summary["terrain_generation_ms"] = python_start - start
+    summary["sensor_generation_ms"] = python_start - start
+if cpp_start:
+    summary["cpp_field_generation_ms"] = cpp_start - python_start if python_start else None
+if final_cost_start:
+    summary["final_cost_generation_ms"] = final_cost_start - cpp_start if cpp_start else None
+if path_planner_start:
+    summary["path_planning_ms"] = end - path_planner_start
+    summary["plot_generation_ms"] = end - path_planner_start
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+PY
+
+echo "[OK] Wrote performance summary: $perf_summary_file"
 
 echo ""
 echo "====================================="

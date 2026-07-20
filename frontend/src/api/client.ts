@@ -10,6 +10,19 @@ export const ALLOWED_PLOT_FILENAMES = [
   "layers.png",
   "final_cost_heatmap.png",
   "final_cost_binary.png",
+  "dijkstra_path.png",
+  "astar_path.png",
+  "genetic_path.png",
+  "monte_carlo_rl_path.png",
+  "theta_star_path.png",
+  "dstar_lite_path.png",
+  "ant_colony_path.png",
+  "lazy_3d_route.png",
+  "lazy_3d_route_over_terrain.png",
+  "lazy_3d_altitude_profile.png",
+  "lazy_3d_cost_profile.png",
+  "lazy_3d_stats_summary.png",
+  "algorithm_comparison.png",
 ] as const;
 
 export const ALLOWED_FILE_FILENAMES = [
@@ -29,6 +42,12 @@ function normalizeBase(base: string) {
   return base.replace(/\/+$/, "");
 }
 
+function upgradeToHttps(url: string) {
+  if (typeof window === "undefined") return url;
+  if (window.location.protocol !== "https:" || !url.startsWith("http://")) return url;
+  return `https://${url.slice("http://".length)}`;
+}
+
 function assertRunId(runId: string) {
   if (!RUN_ID_PATTERN.test(runId)) {
     throw new Error("Invalid run ID.");
@@ -46,13 +65,17 @@ function buildUrl(path: string) {
     return path;
   }
 
-  return `${normalizeBase(API_BASE)}${path}`;
+  return upgradeToHttps(`${normalizeBase(API_BASE)}${path}`);
 }
 
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(buildUrl(path), {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Requested-With": "XMLHttpRequest",
+      ...(init?.headers ?? {}),
+    },
   });
 
   if (!res.ok) {

@@ -11,7 +11,7 @@ data/outputs/
 data/plots/
 outputs/
 plots/
-
+runs/
 # Python cache
 *.pyc
 *.pyo

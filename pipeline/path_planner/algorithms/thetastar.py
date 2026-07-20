@@ -113,8 +113,7 @@ class ThetaStarPlanner:
         segment_distance = math.sqrt((row1 - row0) ** 2 + (col1 - col0) ** 2)
 
         if steps > 0:
-            average_cost = total_cost / steps
-            return True, average_cost * segment_distance
+            return True, total_cost
 
         return False, float("inf")
 
@@ -170,7 +169,7 @@ class ThetaStarPlanner:
                 return {
                     "success": True,
                     "path": path,
-                    "total_cost": float(g_score[goal]),
+                    "total_cost": self._path_total_cost(path),
                     "nodes_visited": nodes_visited,
                     "runtime_seconds": runtime_seconds,
                     "los_optimizations": los_optimizations,
@@ -232,6 +231,9 @@ class ThetaStarPlanner:
             nodes_visited=nodes_visited,
             los_optimizations=los_optimizations,
         )
+
+    def _path_total_cost(self, path: List[GridPoint]) -> float:
+        return float(sum(float(self.cost_matrix[row, col]) for row, col in path))
 
     def _reconstruct_path(
         self,

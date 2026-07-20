@@ -13,6 +13,7 @@ import { Route as SimulationRouteImport } from './routes/simulation'
 import { Route as ResultsRouteImport } from './routes/results'
 import { Route as MethodologyRouteImport } from './routes/methodology'
 import { Route as DronesRouteImport } from './routes/drones'
+import { Route as SwarmStudyRouteImport } from './routes/swarm-study'
 import { Route as IndexRouteImport } from './routes/index'
 
 const SimulationRoute = SimulationRouteImport.update({
@@ -35,6 +36,11 @@ const DronesRoute = DronesRouteImport.update({
   path: '/drones',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SwarmStudyRoute = SwarmStudyRouteImport.update({
+  id: '/swarm-study',
+  path: '/swarm-study',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
@@ -46,6 +52,7 @@ export interface FileRoutesByFullPath {
   '/drones': typeof DronesRoute
   '/methodology': typeof MethodologyRoute
   '/results': typeof ResultsRoute
+  '/swarm-study': typeof SwarmStudyRoute
   '/simulation': typeof SimulationRoute
 }
 export interface FileRoutesByTo {
@@ -53,6 +60,7 @@ export interface FileRoutesByTo {
   '/drones': typeof DronesRoute
   '/methodology': typeof MethodologyRoute
   '/results': typeof ResultsRoute
+  '/swarm-study': typeof SwarmStudyRoute
   '/simulation': typeof SimulationRoute
 }
 export interface FileRoutesById {
@@ -61,14 +69,15 @@ export interface FileRoutesById {
   '/drones': typeof DronesRoute
   '/methodology': typeof MethodologyRoute
   '/results': typeof ResultsRoute
+  '/swarm-study': typeof SwarmStudyRoute
   '/simulation': typeof SimulationRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/drones' | '/methodology' | '/results' | '/simulation'
+  fullPaths: '/' | '/drones' | '/methodology' | '/results' | '/simulation' | '/swarm-study'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/drones' | '/methodology' | '/results' | '/simulation'
-  id: '__root__' | '/' | '/drones' | '/methodology' | '/results' | '/simulation'
+  to: '/' | '/drones' | '/methodology' | '/results' | '/simulation' | '/swarm-study'
+  id: '__root__' | '/' | '/drones' | '/methodology' | '/results' | '/simulation' | '/swarm-study'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -77,6 +86,7 @@ export interface RootRouteChildren {
   MethodologyRoute: typeof MethodologyRoute
   ResultsRoute: typeof ResultsRoute
   SimulationRoute: typeof SimulationRoute
+  SwarmStudyRoute: typeof SwarmStudyRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -109,6 +119,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DronesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/swarm-study': {
+      id: '/swarm-study'
+      path: '/swarm-study'
+      fullPath: '/swarm-study'
+      preLoaderRoute: typeof SwarmStudyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/': {
       id: '/'
       path: '/'
@@ -125,6 +142,7 @@ const rootRouteChildren: RootRouteChildren = {
   MethodologyRoute: MethodologyRoute,
   ResultsRoute: ResultsRoute,
   SimulationRoute: SimulationRoute,
+  SwarmStudyRoute: SwarmStudyRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

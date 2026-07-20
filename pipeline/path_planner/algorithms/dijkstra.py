@@ -152,7 +152,7 @@ class DijkstraPlanner:
             }
 
         path = self._reconstruct_path(start, goal, parent_map)
-        total_cost = float(distances[goal[0], goal[1]])
+        total_cost = self._path_total_cost(path)
 
         return {
             "success": True,
@@ -162,6 +162,9 @@ class DijkstraPlanner:
             "runtime_seconds": runtime_seconds,
             "failure_reason": None,
         }
+
+    def _path_total_cost(self, path: List[GridPoint]) -> float:
+        return float(sum(float(self.grid.cost_matrix[row, col]) for row, col in path))
 
     def _reconstruct_path(
         self,
@@ -199,6 +202,7 @@ def run_dijkstra(
     flight_z: int,
     threat_threshold: float = 999999.0,
     fuel_capacity: Optional[float] = None,
+    transition_cost_adapter: Any | None = None,
 ) -> Dict[str, Any]:
     """
     Pipeline-friendly Dijkstra entry point.
@@ -247,4 +251,5 @@ def run_dijkstra(
         "failureReason": raw["failure_reason"],
         "pathCsv": "dijkstra_path.csv",
         "pathPlot": "dijkstra_path.png",
+        "transitionAware": transition_cost_adapter is not None,
     }

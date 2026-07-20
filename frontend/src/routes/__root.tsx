@@ -75,6 +75,9 @@ function TopNav() {
           <Link to="/methodology" className="topnav-link">
             Methodology
           </Link>
+          <Link to="/swarm-study" className="topnav-link">
+            Swarm Study
+          </Link>
         </div>
         <div className="topnav-meta">
           {clientIdShort ? (
@@ -100,4 +103,3 @@ function RootComponent() {
     </QueryClientProvider>
   );
 }
-

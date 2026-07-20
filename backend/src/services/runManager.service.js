@@ -1,5 +1,6 @@
 const Run = require("../models/Run");
 const fileService = require("./fileService");
+const csvInputService = require("./csvInput.service");
 const scenarioConfig = require("./scenarioConfig.service");
 const { createRunId } = require("../utils/ids");
 const { getRunPaths } = require("../utils/paths");
@@ -13,6 +14,11 @@ async function createQueuedRun(payload) {
 
   await fileService.createRunDirectories(paths);
   await scenarioConfig.writeScenarioEnv(paths.scenarioConfigFile, config);
+
+  const csvPayload = csvInputService.collectInputCsvPayload(config);
+  if (Object.keys(csvPayload).length > 0) {
+    await csvInputService.writeInputCsvFiles(paths.csvDir, csvPayload);
+  }
 
   const run = await Run.create({
     runId,

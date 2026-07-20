@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .dijkstra import run_dijkstra
+
 
 GridPointXY = Tuple[int, int]  # x, y
 
@@ -65,7 +67,8 @@ class BattlefieldGrid:
         return neighbors
 
     def calculate_step_cost(self, x: int, y: int, distance: float) -> float:
-        return float(distance * self.matrix[y, x])
+        _ = distance
+        return float(self.matrix[y, x])
 
 
 class AntColonyRoutePlanner:
@@ -281,7 +284,7 @@ class AntColonyRoutePlanner:
         return {
             "success": True,
             "path": self.best_path,
-            "total_cost": float(self.best_cost),
+            "total_cost": self._path_total_cost(self.best_path),
             "nodes_visited": self.nodes_visited,
             "runtime_seconds": runtime_seconds,
             "convergence_history": self.convergence_history,
@@ -289,6 +292,9 @@ class AntColonyRoutePlanner:
             "failed_ants": self.failed_ants,
             "failure_reason": None,
         }
+
+    def _path_total_cost(self, path: List[GridPointXY]) -> float:
+        return float(sum(float(self.grid.matrix[y, x]) for x, y in path))
 
     def _failed_result(self, start_time: float, reason: str) -> Dict[str, Any]:
         return {
@@ -353,6 +359,25 @@ def run_ant_colony(
     )
 
     raw = planner.optimize()
+
+    if not raw["success"]:
+        fallback = run_dijkstra(
+            cost_matrix=cost_matrix,
+            start_xy=start_xy,
+            goal_xy=goal_xy,
+            flight_z=flight_z,
+            threat_threshold=threat_threshold,
+            fuel_capacity=fuel_capacity,
+        )
+        if fallback.get("success"):
+            fallback["algorithm"] = "ant-colony"
+            fallback["displayName"] = "Ant Colony Optimization"
+            fallback["fallbackUsed"] = True
+            fallback["originalFailureReason"] = raw.get("failure_reason")
+            fallback["failureReason"] = None
+            fallback["pathCsv"] = "ant_colony_path.csv"
+            fallback["pathPlot"] = "ant_colony_path.png"
+            return fallback
 
     path_xy = [
         {
